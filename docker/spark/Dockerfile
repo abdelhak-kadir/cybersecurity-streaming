@@ -1,15 +1,15 @@
-FROM python:3.9-slim
+FROM python:3.9-bullseye
 
 USER root
 
-# Install Java (required for Spark) - use OpenJDK 17 for Debian Trixie
+# Install Java 11 (Debian Bullseye has it)
 RUN apt-get update && apt-get install -y \
-    openjdk-17-jre-headless \
+    openjdk-11-jre-headless \
     wget \
     procps \
     && rm -rf /var/lib/apt/lists/*
 
-ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+ENV JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
 
 # Download and install Spark
 ENV SPARK_VERSION=3.3.0
