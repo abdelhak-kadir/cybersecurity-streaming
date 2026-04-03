@@ -97,17 +97,3 @@ make clean                      # stop + delete all containers + volumes
 | Signatures    | sqlmap / nikto / OR 1=1 / UNION SELECT in request | 95   |
 | Volume anomaly| >10 MB transferred by same IP in 10 seconds      | 70    |
 
-## GitHub Workflow
-
-```bash
-# This is orobida's branch
-git checkout develop
-git checkout -b feature/streaming-kafka-spark
-
-# Work on files in streaming/
-git add streaming/ docker/ docker-compose.yml Makefile
-git commit -m "feat(streaming): add Kafka producer + Spark detection + Cassandra"
-git push origin feature/streaming-kafka-spark
-
-# Open Pull Request: feature/streaming-kafka-spark → develop
-```
