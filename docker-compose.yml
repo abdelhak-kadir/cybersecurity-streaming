@@ -89,30 +89,29 @@ services:
     networks:
       - cyber-net
 
-  # ── Spark master ──────────────────────────────────────────────────────
+# ── Spark master ──────────────────────────────────────────────────────
   spark-master:
     build: ./docker/spark
     container_name: spark-master
     environment:
       - SPARK_MODE=master
-      - SPARK_MASTER_HOST=spark-master
     ports:
       - "8080:8080"   # Spark Web UI
       - "7077:7077"   # Spark master port
+    command: /opt/spark/sbin/start-master.sh -h spark-master && tail -f /opt/spark/logs/*
     networks:
       - cyber-net
 
-  # ── Spark worker ──────────────────────────────────────────────────────
+# ── Spark worker ──────────────────────────────────────────────────────
   spark-worker:
     build: ./docker/spark
     container_name: spark-worker
     depends_on:
       - spark-master
     environment:
-      - SPARK_MODE=worker
-      - SPARK_MASTER_URL=spark://spark-master:7077
       - SPARK_WORKER_MEMORY=2G
       - SPARK_WORKER_CORES=2
+    command: /opt/spark/sbin/start-worker.sh spark://spark-master:7077 && tail -f /opt/spark/logs/*
     networks:
       - cyber-net
 
