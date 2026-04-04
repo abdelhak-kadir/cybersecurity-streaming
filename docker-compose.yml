@@ -154,9 +154,74 @@ services:
     networks:
       - cyber-net
 
-volumes:
-  cassandra-data:
 
+
+
+# ── Hadoop HDFS Namenode ──────────────────────────────────────────────
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: namenode
+    environment:
+      - CLUSTER_NAME=cyber-hadoop
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+    ports:
+      - "9870:9870"   # HDFS Web UI
+      - "9000:9000"
+    volumes:
+      - hdfs-namenode:/hadoop/dfs/name
+      - ./data:/data  # ton CSV sera accessible ici
+    networks:
+      - cyber-net
+
+  # ── Hadoop HDFS Datanode ──────────────────────────────────────────────
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: datanode
+    depends_on:
+      - namenode
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+    volumes:
+      - hdfs-datanode:/hadoop/dfs/data
+    networks:
+      - cyber-net
+
+  # ── HBase ─────────────────────────────────────────────────────────────
+  hbase:
+    image: dajobe/hbase
+    container_name: hbase
+    depends_on:
+      - namenode
+    ports:
+      - "16000:16000"
+      - "16010:16010"  # HBase Web UI
+      - "16020:16020"
+      - "16030:16030"
+    networks:
+      - cyber-net
+
+  # ── Spark Batch job ───────────────────────────────────────────────────
+  spark-batch:
+    build: ./docker/spark
+    container_name: spark-batch
+    depends_on:
+      - namenode
+      - hbase
+      - spark-master
+    volumes:
+      - ./batch/scripts:/app    # tes scripts PySpark
+      - ./data:/data            # le CSV
+    working_dir: /app
+    command: tail -f /dev/null  # reste actif, tu lances les scripts manuellement
+    networks:
+      - cyber-net
+
+volumes:
+  cassandra-data: {}
+  hdfs-namenode: {}
+  hdfs-datanode: {}
+
+  
 networks:
   cyber-net:
     driver: bridge
