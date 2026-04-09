@@ -165,11 +165,11 @@ services:
       - CLUSTER_NAME=cyber-hadoop
       - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
     ports:
-      - "9870:9870"   # HDFS Web UI
+      - "9870:9870"   
       - "9000:9000"
     volumes:
       - hdfs-namenode:/hadoop/dfs/name
-      - ./data:/data  # ton CSV sera accessible ici
+      - ./data:/data  
     networks:
       - cyber-net
 
@@ -194,13 +194,13 @@ services:
       - namenode
     ports:
       - "16000:16000"
-      - "16010:16010"  # HBase Web UI
+      - "16010:16010"  
       - "16020:16020"
       - "16030:16030"
     networks:
       - cyber-net
 
-  # ── Spark Batch job ───────────────────────────────────────────────────
+# ── Spark Batch job ───────────────────────────────────────────────────
   spark-batch:
     build: ./docker/spark
     container_name: spark-batch
@@ -209,10 +209,10 @@ services:
       - hbase
       - spark-master
     volumes:
-      - ./batch/scripts:/app    # tes scripts PySpark
-      - ./data:/data            # le CSV
+      - ./batch/scripts:/app
+      - ./batch/data:/data
     working_dir: /app
-    command: tail -f /dev/null  # reste actif, tu lances les scripts manuellement
+    command: tail -f /dev/null
     networks:
       - cyber-net
 
@@ -221,7 +221,6 @@ volumes:
   hdfs-namenode: {}
   hdfs-datanode: {}
 
-  
 networks:
   cyber-net:
     driver: bridge
