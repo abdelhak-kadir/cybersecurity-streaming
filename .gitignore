@@ -1,0 +1,12 @@
+data/*.csv
+data/*.zip
+__pycache__/
+*.pyc
+.env
+venv/
+.DS_Store
+*.log
+batch/data/*.csv
+batch/data/*.zip
+data/*.csv
+data/*.zip
