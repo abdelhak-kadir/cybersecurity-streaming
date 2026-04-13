@@ -1,50 +1,89 @@
 import os
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, sum as spark_sum, round, when, lower
+from pyspark.sql.functions import col, sum as spark_sum, avg, min as spark_min, max as spark_max, round, when, lower
 
+# =====================================================
 # 1. Initialisation de Spark
+# =====================================================
 spark = SparkSession.builder \
-    .appName("DetailedThreatVolume") \
+    .appName("FullCorrelation_Threat_Volume") \
     .config("spark.hadoop.fs.defaultFS", "hdfs://namenode:9000") \
     .getOrCreate()
 
-# 2. Chemin vers tes données sur HDFS (plus rapide et cohérent)
-# On utilise les données nettoyées par ton script de chargement
+spark.sparkContext.setLogLevel("ERROR")
+
+# =====================================================
+# 2. Chargement des données (Parquet sur HDFS)
+# =====================================================
 HDFS_PATH = "hdfs://namenode:9000/logs/cybersecurity/"
+try:
+    df = spark.read.parquet(HDFS_PATH)
+except Exception as e:
+    print(f"❌ Erreur : {e}")
+    spark.stop()
+    exit()
 
-# 3. Chargement du dataset Parquet
-print(f"🚀 Lecture des logs depuis HDFS : {HDFS_PATH}")
-df = spark.read.parquet(HDFS_PATH)
+# =====================================================
+# 3. Corrélation Complète (Pattern Matching)
+# =====================================================
+SQLI_PATTERN = r"select|union|insert|drop|sleep|benchmark|'|--|#"
+XSS_PATTERN = r"script|alert|<|>|javascript|iframe|document\.cookie"
 
-# 4. Prétraitement
-df_lower = df.withColumn("req_lower", lower(col("request_path")))
-
-# 5. Patterns de détection
-sqli_pattern = r"select|union|insert|drop|'|--|#"
-xss_pattern = r"script|alert|<|>|javascript"
-
-# 6. Création de la catégorie détaillée
-df_categorized = df_lower.withColumn("attack_type", 
-    when(col("req_lower").rlike(sqli_pattern), "SQL Injection")
-    .when(col("req_lower").rlike(xss_pattern), "XSS")
-    .otherwise("Other/Benign")
+df_correlated = df.withColumn(
+    "attack_type",
+    when(lower(col("request_path")).rlike(SQLI_PATTERN), "SQL Injection")
+    .when(lower(col("request_path")).rlike(XSS_PATTERN), "XSS")
+    .otherwise("Benign/Unknown")
 )
 
-# 7. Calcul des statistiques
-# Note: j'utilise spark_sum pour éviter les conflits avec le sum de Python
-detailed_stats = df_categorized.groupBy("attack_type").agg(
-    spark_sum("bytes_transferred").alias("total_bytes"),
-    round(spark_sum("bytes_transferred") / 1024, 2).alias("total_KB")
-).orderBy(col("total_bytes").desc())
+# =====================================================
+# 4. Calcul des Statistiques (Min, Max, Moyenne, Unités)
+# =====================================================
+# On calcule tout en une seule agrégation pour plus de performance
+volume_stats = df_correlated.groupBy("attack_type").agg(
+    spark_sum("bytes_transferred").alias("total_b"),
+    spark_min("bytes_transferred").alias("min_b"),
+    spark_max("bytes_transferred").alias("max_b"),
+    avg("bytes_transferred").alias("avg_b")
+)
 
-# 8. Affichage
-print("\n" + "="*60)
-print("📊 VOLUME DE DONNÉES PAR TYPE D'ATTAQUE (DÉTECTION SALMA)")
-print("="*60)
-detailed_stats.show(truncate=False)
+# Conversion en KB, MB, GB pour satisfaire les specs du prof
+final_stats = volume_stats.select(
+    col("attack_type"),
+    round(col("total_b") / 1024, 2).alias("Vol_KB"),
+    round(col("total_b") / (1024**2), 2).alias("Vol_MB"),
+    round(col("total_b") / (1024**3), 4).alias("Vol_GB"),
+    round(col("min_b"), 2).alias("Min_Bytes"),
+    round(col("max_b"), 2).alias("Max_Bytes"),
+    round(col("avg_b"), 2).alias("Moyenne_Bytes")
+)
 
-# 9. Sauvegarde du résultat pour HBase plus tard
-# Optionnel : tu peux sauvegarder ce petit tableau sur HDFS
-detailed_stats.write.mode("overwrite").parquet("hdfs://namenode:9000/results/attack_volumes/")
+# =====================================================
+# 5. Détection des Anomalies (> 10MB)
+# =====================================================
+# Le prof veut isoler les transferts volumineux (Exfiltration possible)
+anomalies = df_correlated.filter(col("bytes_transferred") > (10 * 1024 * 1024))
+
+# =====================================================
+# 6. Affichage et Sauvegarde HDFS
+# =====================================================
+print("\n" + "=" * 80)
+print("📊 RAPPORT DE CORRÉLATION ET ANALYSE DE VOLUME")
+print("=" * 80)
+final_stats.show(truncate=False)
+
+if anomalies.count() > 0:
+    print(f"⚠️ ATTENTION : {anomalies.count()} transferts anormaux (> 10MB) détectés !")
+    anomalies.select("source_ip", "request_path", "bytes_transferred").show(5)
+
+# Sauvegarde des statistiques finales sur HDFS
+OUTPUT_STATS = "hdfs://namenode:9000/results/correlation_stats/"
+final_stats.write.mode("overwrite").parquet(OUTPUT_STATS)
+
+# Sauvegarde spécifique des anomalies pour investigation
+OUTPUT_ANOMALIES = "hdfs://namenode:9000/results/detected_anomalies_10MB/"
+anomalies.write.mode("overwrite").parquet(OUTPUT_ANOMALIES)
+
+print(f"✅ Statistiques et Anomalies sauvegardées sur HDFS.")
 
 spark.stop()

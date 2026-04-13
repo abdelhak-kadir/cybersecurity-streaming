@@ -1,60 +1,96 @@
 import os
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, lower
+from pyspark.sql.functions import col, lower, when
 
-# 1. Initialisation Spark (Configuré pour ton réseau Docker)
+# =====================================================
+# 1. Initialisation de Spark
+# =====================================================
 spark = SparkSession.builder \
-    .appName("CyberDetection_HDFS") \
+    .appName("Advanced_Cyber_Detection") \
     .config("spark.hadoop.fs.defaultFS", "hdfs://namenode:9000") \
     .getOrCreate()
 
 spark.sparkContext.setLogLevel("ERROR")
 
-# 2. Chemin HDFS (doit correspondre à la sortie de ton premier script)
+# =====================================================
+# 2. Lecture des données sur HDFS
+# =====================================================
 HDFS_PATH = "hdfs://namenode:9000/logs/cybersecurity/"
-
-print(f"🚀 Lecture des données partitionnées sur HDFS : {HDFS_PATH}")
-
 try:
-    # Lecture du format Parquet (plus rapide que le CSV car déjà traité)
     df = spark.read.parquet(HDFS_PATH)
 except Exception as e:
-    print(f"❌ Erreur : Impossible de lire les données. Vérifie si le premier script a bien fonctionné. {e}")
+    print(f"❌ Erreur : {e}")
     spark.stop()
     exit()
 
-# 3. Patterns de détection (Sécurisés)
-# On cherche les mots clés SQL et les balises Script
-sqli_pattern = r"select\s+|union\s+|insert\s+|delete\s+|drop\s+|'|--|#|cast\(|convert\("
-xss_pattern = r"<script.*?>|alert\(|onload=|onerror=|eval\(|javascript:"
+# =====================================================
+# 3. PATTERNS AVANCÉS (La partie que tu voulais)
+# =====================================================
 
-# 4. Analyse et marquage des intrusions
-df_analyzed = df.withColumn("is_sqli", 
-    lower(col("request_path")).rlike(sqli_pattern) | lower(col("user_agent")).rlike(sqli_pattern)
-).withColumn("is_xss", 
-    lower(col("request_path")).rlike(xss_pattern) | lower(col("user_agent")).rlike(xss_pattern)
+# 1. SQLi Musclé : Ajout de Blind SQLi (sleep, benchmark) et encodages
+SQLI_PATTERN = (
+    r"select\s+|union\s+|insert\s+|delete\s+|drop\s+|'|--|#|"  # Base
+    r"sleep\(|benchmark\(|waitfor\s+delay|"                    # Blind SQLi
+    r"group\s+by|having|order\s+by|limit|"                      # Énumération
+    r"util_http|ctxsys|dbms_pipe|extractvalue"                  # Out-of-band / XML
 )
 
-# 5. Filtrage : On ne garde que les alertes
-alerts = df_analyzed.filter((col("is_sqli") == True) | (col("is_xss") == True))
+# 2. XSS Avancé : Ajout d'iframes, manipulation de cookies et événements obscurs
+XSS_PATTERN = (
+    r"<script.*?>|alert\(|eval\(|javascript:|onerror=|onload=|" # Base
+    r"<iframe.*?>|document\.cookie|window\.location|"           # Vol de session
+    r"prompt\(|confirm\(|String\.fromCharCode|"                # Obfuscation
+    r"onmouseover=|onfocus=|onscroll="                          # Events DOM
+)
 
-# 6. Affichage du rapport technique
-print("\n" + "="*60)
-print("📊 RAPPORT DE DÉTECTION D'INTRUSION (MODE BATCH)")
-print(f"Total des logs analysés : {df.count()}")
-print(f"Alertes SQL Injection   : {df_analyzed.filter(col('is_sqli') == True).count()}")
-print(f"Alertes XSS             : {df_analyzed.filter(col('is_xss') == True).count()}")
-print("="*60 + "\n")
+# 3. Outils d'Attaque : Détection via le User-Agent
+TOOLS_PATTERN = r"sqlmap|nikto|dirbuster|gobuster|nmap|hydra|metasploit|burp|nessus"
 
+# =====================================================
+# 4. Analyse Multi-Critères
+# =====================================================
+df_analyzed = df.withColumn(
+    "is_sqli",
+    lower(col("request_path")).rlike(SQLI_PATTERN) | 
+    lower(col("user_agent")).rlike(SQLI_PATTERN)
+).withColumn(
+    "is_xss",
+    lower(col("request_path")).rlike(XSS_PATTERN) | 
+    lower(col("user_agent")).rlike(XSS_PATTERN)
+).withColumn(
+    "is_tool",
+    lower(col("user_agent")).rlike(TOOLS_PATTERN)
+)
+
+# =====================================================
+# 5. Filtrage et Statistiques
+# =====================================================
+# On crée une colonne globale pour les alertes
+alerts = df_analyzed.filter(
+    (col("is_sqli") == True) | (col("is_xss") == True) | (col("is_tool") == True)
+)
+
+sqli_count = df_analyzed.filter(col("is_sqli") == True).count()
+xss_count = df_analyzed.filter(col("is_xss") == True).count()
+tools_count = df_analyzed.filter(col("is_tool") == True).count()
+
+print("\n" + "=" * 60)
+print("🛡️  RAPPORT DE DÉTECTION AVANCÉ (BATCH)")
+print(f"Alertes SQL Injection (Blind incluse) : {sqli_count}")
+print(f"Alertes XSS (Advanced DOM/Cookie)    : {xss_count}")
+print(f"Outils d'attaque détectés (User-Agent): {tools_count}")
+print("=" * 60 + "\n")
+
+# =====================================================
+# 6. Sauvegarde des résultats
+# =====================================================
 if alerts.count() > 0:
-    print("🚩 Échantillon des 10 dernières alertes détectées :")
-    alerts.select("source_ip", "request_path", "is_sqli", "is_xss").show(10, truncate=False)
-
-    # 7. Sauvegarde des alertes sur HDFS (Dossier spécifique aux incidents)
-    ALERTS_OUTPUT = "hdfs://namenode:9000/alerts/detected_intrusions"
+    ALERTS_OUTPUT = "hdfs://namenode:9000/alerts/advanced_intrusions"
     alerts.write.mode("overwrite").parquet(ALERTS_OUTPUT)
-    print(f"✅ Alertes persistées sur HDFS : {ALERTS_OUTPUT}")
+    
+    print("🚩 Top 5 des IPs les plus suspectes :")
+    alerts.groupBy("source_ip").count().orderBy(col("count").desc()).show(5)
 else:
-    print("✅ Analyse terminée : Aucune menace détectée.")
+    print("✅ Aucune menace détectée avec les nouveaux patterns.")
 
 spark.stop()
