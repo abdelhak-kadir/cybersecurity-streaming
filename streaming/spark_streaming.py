@@ -21,7 +21,6 @@ from pyspark.sql.types import (
     StructType, StructField,
     StringType, LongType, TimestampType
 )
-from cassandra.cluster import Cluster
 import time
 # ── Config ────────────────────────────────────────────────────────────────
 KAFKA_BROKER      = os.getenv("KAFKA_BROKER",   "kafka:29092")
@@ -152,6 +151,7 @@ def make_batch_writer(query_name: str):
       2. Upserts each row's IP into ip_threat_summary
     """
     def save_batch(batch_df, batch_id):
+        from cassandra.cluster import Cluster
         n = batch_df.count()
         if n == 0:
             return
