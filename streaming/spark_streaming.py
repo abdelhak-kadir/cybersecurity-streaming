@@ -15,14 +15,13 @@ import os
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col, from_json, window, count,
-    sum as spark_sum, current_timestamp, lit ,collect_set, max as spark_max
+    sum as spark_sum, current_timestamp, lit 
 )
 from pyspark.sql.types import (
     StructType, StructField,
     StringType, LongType, TimestampType
 )
-from cassandra.cluster import Cluster
-from cassandra.query import SimpleStatement
+
 import time
 # ── Config ────────────────────────────────────────────────────────────────
 KAFKA_BROKER      = os.getenv("KAFKA_BROKER",   "kafka:29092")
@@ -106,35 +105,20 @@ def _get_cassandra_session():
     session = cluster.connect(CASSANDRA_KEYSPACE)
     return session
 
-def upsert_summary(batch_df, batch_id):
+def upsert_summary(ip, threat_score, attack_type, last_seen):
     """
-    For each (ip_source, attack_type) pair in the batch:
-      - Read the existing row from ip_threat_summary
-      - Merge: max threat_score, append new attack types, increment total_alerts
-      - Write back with UPDATE … IF EXISTS / INSERT
+    Read existing ip_threat_summary row for this IP,
+    merge scores/types/counts, write back.
+    Import is inside the function to avoid top-level serialization issues.
     """
-    if batch_df.count() == 0:
-        return
+    from cassandra.cluster import Cluster
  
-    # Aggregate the micro-batch: one row per ip_source
-    aggregated = (
-        batch_df
-        .groupBy("ip_source")
-        .agg(
-            spark_max("threat_score").alias("batch_max_score"),
-            collect_set("attack_type").alias("batch_attack_types"),
-            count("*").alias("batch_alert_count"),
-            spark_max("last_seen").alias("batch_last_seen"),
-        )
-    ).collect()
- 
-    session = _get_cassandra_session()
+    cluster = Cluster([CASSANDRA_HOST])
+    session = cluster.connect(CASSANDRA_KEYSPACE)
  
     select_stmt = session.prepare(
-        f"SELECT threat_score, attack_types, total_alerts "
-        f"FROM {SUMMARY_TABLE} WHERE ip_source = ?"
+        f"SELECT threat_score, attack_types, total_alerts FROM {SUMMARY_TABLE} WHERE ip_source = ?"
     )
- 
     upsert_stmt = session.prepare(
         f"""
         UPDATE {SUMMARY_TABLE}
@@ -146,39 +130,56 @@ def upsert_summary(batch_df, batch_id):
         """
     )
  
-    for row in aggregated:
-        ip            = row["ip_source"]
-        new_score     = row["batch_max_score"]
-        new_types     = set(row["batch_attack_types"])
-        new_alerts    = row["batch_alert_count"]
-        new_last_seen = row["batch_last_seen"]
+    existing = session.execute(select_stmt, [ip]).one()
  
-        # Read existing row (if any)
-        existing = session.execute(select_stmt, [ip]).one()
+    if existing:
+        merged_score  = max(threat_score, existing.threat_score or 0)
+        merged_types  = list(set(existing.attack_types or []) | {attack_type})
+        merged_alerts = (existing.total_alerts or 0) + 1
+    else:
+        merged_score  = threat_score
+        merged_types  = [attack_type]
+        merged_alerts = 1
  
-        if existing:
-            merged_score  = max(new_score, existing.threat_score or 0)
-            merged_types  = list(set(existing.attack_types or []) | new_types)
-            merged_alerts = (existing.total_alerts or 0) + new_alerts
-        else:
-            merged_score  = new_score
-            merged_types  = list(new_types)
-            merged_alerts = new_alerts
- 
-        session.execute(upsert_stmt, [
-            new_last_seen,
-            merged_score,
-            merged_types,
-            merged_alerts,
-            ip,
-        ])
-        print(
-            f"[summary] {ip} → score={merged_score}, "
-            f"types={merged_types}, total_alerts={merged_alerts}"
-        )
- 
-    session.cluster.shutdown()
+    session.execute(upsert_stmt, [last_seen, merged_score, merged_types, merged_alerts, ip])
+    cluster.shutdown()
 
+# ── Combined foreachBatch: write to both tables ───────────────────────────
+def make_batch_writer(query_name: str):
+    """
+    Returns a foreachBatch function that:
+      1. Appends all rows to realtime_threats
+      2. Upserts each row's IP into ip_threat_summary
+    """
+    def save_batch(batch_df, batch_id):
+        n = batch_df.count()
+        if n == 0:
+            return
+ 
+        print(f"[{query_name}] batch {batch_id} — {n} threat(s)")
+ 
+        # ── Write to realtime_threats ──────────────────────────────────
+        batch_df.write \
+            .format("org.apache.spark.sql.cassandra") \
+            .options(keyspace=CASSANDRA_KEYSPACE, table=CASSANDRA_TABLE) \
+            .mode("append") \
+            .save()
+ 
+        # ── Upsert ip_threat_summary (one call per row) ────────────────
+        rows = batch_df.select("ip_source", "threat_score", "attack_type", "last_seen").collect()
+        for row in rows:
+            try:
+                upsert_summary(
+                    ip=row["ip_source"],
+                    threat_score=row["threat_score"],
+                    attack_type=row["attack_type"],
+                    last_seen=row["last_seen"],
+                )
+                print(f"  [summary] {row['ip_source']} → score={row['threat_score']}, type={row['attack_type']}")
+            except Exception as e:
+                print(f"  [summary] ERROR for {row['ip_source']}: {e}")
+ 
+    return save_batch
 
 # ── DETECTION 1: Brute-force ──────────────────────────────────────────────
 # Rule: same IP gets blocked 5+ times within a 1-minute window
@@ -245,19 +246,7 @@ volume_anomaly = logs \
 q3 = write_to_cassandra(volume_anomaly, "volume-stream")
 print("Detection 3 started: volume anomaly")
 
-# ── DETECTION 4 (summary): cumulative ip_threat_summary writer ────────────
-# Union all 3 alert streams, then upsert into ip_threat_summary each batch.
-all_threats = brute_force.union(signatures).union(volume_anomaly)
- 
-q4 = all_threats.writeStream \
-    .outputMode("update") \
-    .foreachBatch(upsert_summary) \
-    .queryName("ip-summary-stream") \
-    .option("checkpointLocation", f"{CHECKPOINT_BASE}/summary") \
-    .start()
- 
-print("Detection 4 started: cumulative ip_threat_summary")
 
 # ── Wait for all queries to finish ────────────────────────────────────────
-print("All 4 detection streams are running. Press Ctrl+C to stop.")
+print("All 3 detection streams are running. Press Ctrl+C to stop.")
 spark.streams.awaitAnyTermination()
