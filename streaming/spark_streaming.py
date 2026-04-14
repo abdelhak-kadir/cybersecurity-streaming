@@ -96,6 +96,7 @@ def write_to_cassandra(stream, query_name: str):
         .outputMode("update") \
         .foreachBatch(save_batch) \
         .queryName(query_name) \
+        .option("checkpointLocation", f"{CHECKPOINT_BASE}/{query_name}") \
         .start()
 
 
