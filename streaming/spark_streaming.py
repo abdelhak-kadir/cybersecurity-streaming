@@ -21,7 +21,7 @@ from pyspark.sql.types import (
     StructType, StructField,
     StringType, LongType, TimestampType
 )
-
+from cassandra.cluster import Cluster
 import time
 # ── Config ────────────────────────────────────────────────────────────────
 KAFKA_BROKER      = os.getenv("KAFKA_BROKER",   "kafka:29092")
@@ -158,27 +158,45 @@ def make_batch_writer(query_name: str):
  
         print(f"[{query_name}] batch {batch_id} — {n} threat(s)")
  
-        # ── Write to realtime_threats ──────────────────────────────────
+        # Write to realtime_threats
         batch_df.write \
             .format("org.apache.spark.sql.cassandra") \
             .options(keyspace=CASSANDRA_KEYSPACE, table=CASSANDRA_TABLE) \
             .mode("append") \
             .save()
- 
-        # ── Upsert ip_threat_summary (one call per row) ────────────────
+
+        # One Cassandra connection per batch, not per row
+        cluster = Cluster([CASSANDRA_HOST])
+        session = cluster.connect(CASSANDRA_KEYSPACE)
+
+        select_stmt = session.prepare(
+            f"SELECT threat_score, attack_types, total_alerts FROM {SUMMARY_TABLE} WHERE ip_source = ?"
+        )
+        upsert_stmt = session.prepare(
+            f"""UPDATE {SUMMARY_TABLE}
+                SET last_seen = ?, threat_score = ?, attack_types = ?, total_alerts = ?
+                WHERE ip_source = ?"""
+        )
+
         rows = batch_df.select("ip_source", "threat_score", "attack_type", "last_seen").collect()
         for row in rows:
             try:
-                upsert_summary(
-                    ip=row["ip_source"],
-                    threat_score=row["threat_score"],
-                    attack_type=row["attack_type"],
-                    last_seen=row["last_seen"],
-                )
-                print(f"  [summary] {row['ip_source']} → score={row['threat_score']}, type={row['attack_type']}")
+                existing = session.execute(select_stmt, [row["ip_source"]]).one()
+                if existing:
+                    merged_score  = max(row["threat_score"], existing.threat_score or 0)
+                    merged_types  = list(set(existing.attack_types or []) | {row["attack_type"]})
+                    merged_alerts = (existing.total_alerts or 0) + 1
+                else:
+                    merged_score, merged_types, merged_alerts = row["threat_score"], [row["attack_type"]], 1
+
+                session.execute(upsert_stmt, [
+                    row["last_seen"], merged_score, merged_types, merged_alerts, row["ip_source"]
+                ])
             except Exception as e:
                 print(f"  [summary] ERROR for {row['ip_source']}: {e}")
- 
+
+        cluster.shutdown()
+
     return save_batch
 
 # ── DETECTION 1: Brute-force ──────────────────────────────────────────────
@@ -198,7 +216,12 @@ brute_force = logs \
         lit("brute-force").alias("attack_type"),
     )
 
-q1 = write_to_cassandra(brute_force, "brute-force-stream")
+q1 = brute_force.writeStream \
+    .outputMode("update") \
+    .foreachBatch(make_batch_writer("brute-force-stream")) \
+    .queryName("brute-force-stream") \
+    .option("checkpointLocation", f"{CHECKPOINT_BASE}/brute-force-stream") \
+    .start()
 print("Detection 1 started: brute-force")
 
 
@@ -223,7 +246,12 @@ signatures = logs \
         lit("attack-signature").alias("attack_type"),
     )
 
-q2 = write_to_cassandra(signatures, "signature-stream")
+q2 = signatures.writeStream \
+    .outputMode("append") \
+    .foreachBatch(make_batch_writer("signature-stream")) \
+    .queryName("signature-stream") \
+    .option("checkpointLocation", f"{CHECKPOINT_BASE}/signature-stream") \
+    .start()
 print("Detection 2 started: attack signatures")
 
 
@@ -243,7 +271,12 @@ volume_anomaly = logs \
         lit("data-exfiltration").alias("attack_type"),
     )
 
-q3 = write_to_cassandra(volume_anomaly, "volume-stream")
+q3 = volume_anomaly.writeStream \
+    .outputMode("update") \
+    .foreachBatch(make_batch_writer("volume-stream")) \
+    .queryName("volume-stream") \
+    .option("checkpointLocation", f"{CHECKPOINT_BASE}/volume-stream") \
+    .start()
 print("Detection 3 started: volume anomaly")
 
 
