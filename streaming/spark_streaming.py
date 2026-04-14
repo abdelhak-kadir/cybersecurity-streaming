@@ -245,7 +245,19 @@ volume_anomaly = logs \
 q3 = write_to_cassandra(volume_anomaly, "volume-stream")
 print("Detection 3 started: volume anomaly")
 
+# ── DETECTION 4 (summary): cumulative ip_threat_summary writer ────────────
+# Union all 3 alert streams, then upsert into ip_threat_summary each batch.
+all_threats = brute_force.union(signatures).union(volume_anomaly)
+ 
+q4 = all_threats.writeStream \
+    .outputMode("update") \
+    .foreachBatch(upsert_summary) \
+    .queryName("ip-summary-stream") \
+    .option("checkpointLocation", f"{CHECKPOINT_BASE}/summary") \
+    .start()
+ 
+print("Detection 4 started: cumulative ip_threat_summary")
 
 # ── Wait for all queries to finish ────────────────────────────────────────
-print("All 3 detection streams are running. Press Ctrl+C to stop.")
+print("All 4 detection streams are running. Press Ctrl+C to stop.")
 spark.streams.awaitAnyTermination()
