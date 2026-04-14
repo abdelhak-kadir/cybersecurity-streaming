@@ -1,42 +1,81 @@
-import os
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, sum, round, when, lower
-
-# 1. Initialisation de Spark
-spark = SparkSession.builder.appName("DetailedThreatVolume").getOrCreate()
-
-# 2. Chemins vers ton dataset
-script_dir = os.path.dirname(os.path.abspath(__file__))
-path = os.path.join(script_dir, "../data/cybersecurity_threat_detection_logs.csv")
-
-# 3. Chargement du dataset (C'est la ligne qui manquait !)
-df = spark.read.csv(path, header=True, inferSchema=True)
-
-# 4. On utilise lower() pour éviter les problèmes de MAJUSCULES/minuscules
-df_lower = df.withColumn("req_lower", lower(col("request_path")))
-
-# 5. Patterns de détection flexibles
-sqli_pattern = r"select|union|insert|drop|'|--|#"
-xss_pattern = r"script|alert|<|>|javascript"
-
-# 6. Création de la catégorie détaillée
-df_categorized = df_lower.withColumn("attack_type", 
-    when(col("req_lower").rlike(sqli_pattern), "SQL Injection")
-    .when(col("req_lower").rlike(xss_pattern), "XSS")
-    .otherwise("Other/Benign")
+from pyspark.sql.functions import (
+    col, sum as spark_sum, round as spark_round,
+    count, avg, max as spark_max, min as spark_min
 )
 
-# 7. Calcul des statistiques par type d'attaque
-detailed_stats = df_categorized.groupBy("attack_type").agg(
-    sum("bytes_transferred").alias("total_bytes"),
-    round(sum("bytes_transferred") / 1024, 2).alias("total_KB")
-).orderBy(col("total_bytes").desc())
+spark = SparkSession.builder \
+    .appName("ThreatVolumeAnalysis") \
+    .config("spark.hadoop.fs.defaultFS", "hdfs://namenode:9000") \
+    .getOrCreate()
 
-# 8. Affichage
+spark.sparkContext.setLogLevel("ERROR")
+print(" Spark démarré")
+
+
+HDFS_PATH = "hdfs://namenode:9000/logs/cybersecurity/"
+df = spark.read.parquet(HDFS_PATH)
+print(f" Données chargées : {df.count()} lignes")
+
+
+stats_by_threat = df.groupBy("threat_label") \
+    .agg(
+        count("*").alias("nb_events"),
+        spark_sum("bytes_transferred").alias("total_bytes"),
+        spark_round(avg("bytes_transferred"), 2).alias("moyenne_bytes"),
+        spark_max("bytes_transferred").alias("max_bytes"),
+        spark_min("bytes_transferred").alias("min_bytes"),
+        spark_round(spark_sum("bytes_transferred") / 1024, 2).alias("total_KB"),
+        spark_round(spark_sum("bytes_transferred") / (1024*1024), 2).alias("total_MB"),
+        spark_round(spark_sum("bytes_transferred") / (1024*1024*1024), 4).alias("total_GB")
+    ) \
+    .orderBy(col("total_bytes").desc())
+
+stats_by_protocol = df.groupBy("protocol", "threat_label") \
+    .agg(
+        count("*").alias("nb_events"),
+        spark_round(avg("bytes_transferred"), 2).alias("moyenne_bytes"),
+        spark_sum("bytes_transferred").alias("total_bytes")
+    ) \
+    .orderBy(col("total_bytes").desc())
+
+
+SEUIL_BYTES = 10 * 1024 * 1024  
+
+transferts_anormaux = df \
+    .filter(col("bytes_transferred") > SEUIL_BYTES) \
+    .groupBy("source_ip", "threat_label") \
+    .agg(
+        count("*").alias("nb_transferts_anormaux"),
+        spark_sum("bytes_transferred").alias("total_bytes"),
+        spark_round(
+            spark_sum("bytes_transferred") / (1024*1024), 2
+        ).alias("total_MB")
+    ) \
+    .orderBy(col("total_bytes").desc())
+
 print("\n" + "="*60)
-print("VOLUME DE DONNÉES PAR TYPE D'ATTAQUE (DÉTECTION SALMA)")
+print("   CORRÉLATION bytes_transferred ↔ threat_label")
 print("="*60)
-detailed_stats.show(truncate=False)
+stats_by_threat.show(truncate=False)
+
+print("\n" + "="*60)
+print("   VOLUME PAR PROTOCOLE + TYPE DE MENACE")
+print("="*60)
+stats_by_protocol.show(20, truncate=False)
+
+print("\n" + "="*60)
+print("   TRANSFERTS ANORMAUX (> 10MB)")
+print("="*60)
+transferts_anormaux.show(20, truncate=False)
+
+stats_by_threat.write.mode("overwrite") \
+    .parquet("hdfs://namenode:9000/results/threat_volume/")
+print(" Stats par threat_label sauvegardées")
+
+transferts_anormaux.write.mode("overwrite") \
+    .parquet("hdfs://namenode:9000/results/abnormal_transfers/")
+print(" Transferts anormaux sauvegardés")
 
 spark.stop()
-
+print(" Script Threat Volume terminé !")

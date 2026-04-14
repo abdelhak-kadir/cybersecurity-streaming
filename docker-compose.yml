@@ -98,7 +98,10 @@ services:
     ports:
       - "8080:8080"   # Spark Web UI
       - "7077:7077"   # Spark master port
-    command: /opt/spark/sbin/start-master.sh -h spark-master && tail -f /opt/spark/logs/*
+    command:
+      - sh
+      - -lc
+      - /opt/spark/sbin/start-master.sh -h spark-master && tail -f /opt/spark/logs/*
     networks:
       - cyber-net
 
@@ -111,7 +114,12 @@ services:
     environment:
       - SPARK_WORKER_MEMORY=2G
       - SPARK_WORKER_CORES=2
-    command: /opt/spark/sbin/start-worker.sh spark://spark-master:7077 && tail -f /opt/spark/logs/*
+    command:
+      - sh
+      - -lc
+      - /opt/spark/sbin/start-worker.sh spark://spark-master:7077 && tail -f /opt/spark/logs/*
+    volumes:
+      - ./batch/data:/data
     networks:
       - cyber-net
 
@@ -190,15 +198,20 @@ services:
   hbase:
     image: dajobe/hbase
     container_name: hbase
+    hostname: hbase-docker
     depends_on:
       - namenode
     ports:
+      - "9090:9090"
       - "16000:16000"
       - "16010:16010"  
       - "16020:16020"
       - "16030:16030"
+    command: sh -lc "start-hbase.sh && hbase thrift start -p 9090"
     networks:
-      - cyber-net
+      cyber-net:
+        aliases:
+          - hbase-docker
 
 # ── Spark Batch job ───────────────────────────────────────────────────
   spark-batch:
