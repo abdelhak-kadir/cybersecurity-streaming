@@ -15,20 +15,22 @@ import os
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col, from_json, window, count,
-    sum as spark_sum, current_timestamp, lit
+    sum as spark_sum, current_timestamp, lit 
 )
 from pyspark.sql.types import (
     StructType, StructField,
     StringType, LongType, TimestampType
 )
-
+import time
 # ── Config ────────────────────────────────────────────────────────────────
 KAFKA_BROKER      = os.getenv("KAFKA_BROKER",   "kafka:29092")
 KAFKA_TOPIC       = "cybersecurity-logs"
 CASSANDRA_HOST    = os.getenv("CASSANDRA_HOST",  "cassandra")
 CASSANDRA_KEYSPACE = "cybersecurity"
 CASSANDRA_TABLE   = "realtime_threats"
-
+SUMMARY_TABLE      = "ip_threat_summary"
+CHECKPOINT_BASE    = "/tmp/spark-checkpoints"
+ 
 TEN_MB = 10 * 1024 * 1024  # 10 485 760 bytes
 
 
@@ -92,8 +94,110 @@ def write_to_cassandra(stream, query_name: str):
         .outputMode("update") \
         .foreachBatch(save_batch) \
         .queryName(query_name) \
+        .option("checkpointLocation", f"{CHECKPOINT_BASE}/{query_name}") \
         .start()
 
+# ── Helper: upsert cumulative summary in ip_threat_summary ───────────────
+def _get_cassandra_session():
+    """Return a Cassandra session (called inside each executor task)."""
+    cluster = Cluster([CASSANDRA_HOST])
+    session = cluster.connect(CASSANDRA_KEYSPACE)
+    return session
+
+def upsert_summary(ip, threat_score, attack_type, last_seen):
+    """
+    Read existing ip_threat_summary row for this IP,
+    merge scores/types/counts, write back.
+    Import is inside the function to avoid top-level serialization issues.
+    """
+    from cassandra.cluster import Cluster
+ 
+    cluster = Cluster([CASSANDRA_HOST])
+    session = cluster.connect(CASSANDRA_KEYSPACE)
+ 
+    select_stmt = session.prepare(
+        f"SELECT threat_score, attack_types, total_alerts FROM {SUMMARY_TABLE} WHERE ip_source = ?"
+    )
+    upsert_stmt = session.prepare(
+        f"""
+        UPDATE {SUMMARY_TABLE}
+        SET last_seen    = ?,
+            threat_score = ?,
+            attack_types = ?,
+            total_alerts = ?
+        WHERE ip_source = ?
+        """
+    )
+ 
+    existing = session.execute(select_stmt, [ip]).one()
+ 
+    if existing:
+        merged_score  = max(threat_score, existing.threat_score or 0)
+        merged_types  = list(set(existing.attack_types or []) | {attack_type})
+        merged_alerts = (existing.total_alerts or 0) + 1
+    else:
+        merged_score  = threat_score
+        merged_types  = [attack_type]
+        merged_alerts = 1
+ 
+    session.execute(upsert_stmt, [last_seen, merged_score, merged_types, merged_alerts, ip])
+    cluster.shutdown()
+
+# ── Combined foreachBatch: write to both tables ───────────────────────────
+def make_batch_writer(query_name: str):
+    """
+    Returns a foreachBatch function that:
+      1. Appends all rows to realtime_threats
+      2. Upserts each row's IP into ip_threat_summary
+    """
+    def save_batch(batch_df, batch_id):
+        from cassandra.cluster import Cluster
+        n = batch_df.count()
+        if n == 0:
+            return
+ 
+        print(f"[{query_name}] batch {batch_id} — {n} threat(s)")
+ 
+        # Write to realtime_threats
+        batch_df.write \
+            .format("org.apache.spark.sql.cassandra") \
+            .options(keyspace=CASSANDRA_KEYSPACE, table=CASSANDRA_TABLE) \
+            .mode("append") \
+            .save()
+
+        # One Cassandra connection per batch, not per row
+        cluster = Cluster([CASSANDRA_HOST])
+        session = cluster.connect(CASSANDRA_KEYSPACE)
+
+        select_stmt = session.prepare(
+            f"SELECT threat_score, attack_types, total_alerts FROM {SUMMARY_TABLE} WHERE ip_source = ?"
+        )
+        upsert_stmt = session.prepare(
+            f"""UPDATE {SUMMARY_TABLE}
+                SET last_seen = ?, threat_score = ?, attack_types = ?, total_alerts = ?
+                WHERE ip_source = ?"""
+        )
+
+        rows = batch_df.select("ip_source", "threat_score", "attack_type", "last_seen").collect()
+        for row in rows:
+            try:
+                existing = session.execute(select_stmt, [row["ip_source"]]).one()
+                if existing:
+                    merged_score  = max(row["threat_score"], existing.threat_score or 0)
+                    merged_types  = list(set(existing.attack_types or []) | {row["attack_type"]})
+                    merged_alerts = (existing.total_alerts or 0) + 1
+                else:
+                    merged_score, merged_types, merged_alerts = row["threat_score"], [row["attack_type"]], 1
+
+                session.execute(upsert_stmt, [
+                    row["last_seen"], merged_score, merged_types, merged_alerts, row["ip_source"]
+                ])
+            except Exception as e:
+                print(f"  [summary] ERROR for {row['ip_source']}: {e}")
+
+        cluster.shutdown()
+
+    return save_batch
 
 # ── DETECTION 1: Brute-force ──────────────────────────────────────────────
 # Rule: same IP gets blocked 5+ times within a 1-minute window
@@ -112,7 +216,12 @@ brute_force = logs \
         lit("brute-force").alias("attack_type"),
     )
 
-q1 = write_to_cassandra(brute_force, "brute-force-stream")
+q1 = brute_force.writeStream \
+    .outputMode("update") \
+    .foreachBatch(make_batch_writer("brute-force-stream")) \
+    .queryName("brute-force-stream") \
+    .option("checkpointLocation", f"{CHECKPOINT_BASE}/brute-force-stream") \
+    .start()
 print("Detection 1 started: brute-force")
 
 
@@ -137,7 +246,12 @@ signatures = logs \
         lit("attack-signature").alias("attack_type"),
     )
 
-q2 = write_to_cassandra(signatures, "signature-stream")
+q2 = signatures.writeStream \
+    .outputMode("append") \
+    .foreachBatch(make_batch_writer("signature-stream")) \
+    .queryName("signature-stream") \
+    .option("checkpointLocation", f"{CHECKPOINT_BASE}/signature-stream") \
+    .start()
 print("Detection 2 started: attack signatures")
 
 
@@ -157,7 +271,12 @@ volume_anomaly = logs \
         lit("data-exfiltration").alias("attack_type"),
     )
 
-q3 = write_to_cassandra(volume_anomaly, "volume-stream")
+q3 = volume_anomaly.writeStream \
+    .outputMode("update") \
+    .foreachBatch(make_batch_writer("volume-stream")) \
+    .queryName("volume-stream") \
+    .option("checkpointLocation", f"{CHECKPOINT_BASE}/volume-stream") \
+    .start()
 print("Detection 3 started: volume anomaly")
 
 
