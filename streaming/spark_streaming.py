@@ -106,6 +106,79 @@ def _get_cassandra_session():
     session = cluster.connect(CASSANDRA_KEYSPACE)
     return session
 
+def upsert_summary(batch_df, batch_id):
+    """
+    For each (ip_source, attack_type) pair in the batch:
+      - Read the existing row from ip_threat_summary
+      - Merge: max threat_score, append new attack types, increment total_alerts
+      - Write back with UPDATE … IF EXISTS / INSERT
+    """
+    if batch_df.count() == 0:
+        return
+ 
+    # Aggregate the micro-batch: one row per ip_source
+    aggregated = (
+        batch_df
+        .groupBy("ip_source")
+        .agg(
+            spark_max("threat_score").alias("batch_max_score"),
+            collect_set("attack_type").alias("batch_attack_types"),
+            count("*").alias("batch_alert_count"),
+            spark_max("last_seen").alias("batch_last_seen"),
+        )
+    ).collect()
+ 
+    session = _get_cassandra_session()
+ 
+    select_stmt = session.prepare(
+        f"SELECT threat_score, attack_types, total_alerts "
+        f"FROM {SUMMARY_TABLE} WHERE ip_source = ?"
+    )
+ 
+    upsert_stmt = session.prepare(
+        f"""
+        UPDATE {SUMMARY_TABLE}
+        SET last_seen    = ?,
+            threat_score = ?,
+            attack_types = ?,
+            total_alerts = ?
+        WHERE ip_source = ?
+        """
+    )
+ 
+    for row in aggregated:
+        ip            = row["ip_source"]
+        new_score     = row["batch_max_score"]
+        new_types     = set(row["batch_attack_types"])
+        new_alerts    = row["batch_alert_count"]
+        new_last_seen = row["batch_last_seen"]
+ 
+        # Read existing row (if any)
+        existing = session.execute(select_stmt, [ip]).one()
+ 
+        if existing:
+            merged_score  = max(new_score, existing.threat_score or 0)
+            merged_types  = list(set(existing.attack_types or []) | new_types)
+            merged_alerts = (existing.total_alerts or 0) + new_alerts
+        else:
+            merged_score  = new_score
+            merged_types  = list(new_types)
+            merged_alerts = new_alerts
+ 
+        session.execute(upsert_stmt, [
+            new_last_seen,
+            merged_score,
+            merged_types,
+            merged_alerts,
+            ip,
+        ])
+        print(
+            f"[summary] {ip} → score={merged_score}, "
+            f"types={merged_types}, total_alerts={merged_alerts}"
+        )
+ 
+    session.cluster.shutdown()
+
 
 # ── DETECTION 1: Brute-force ──────────────────────────────────────────────
 # Rule: same IP gets blocked 5+ times within a 1-minute window
