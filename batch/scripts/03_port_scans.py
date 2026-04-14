@@ -1,5 +1,5 @@
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, count, countDistinct, window
+from pyspark.sql.functions import col, count, countDistinct, lit, window
 
 # ── 1. Créer la session Spark ──────────────────────────────────────────
 spark = SparkSession.builder \
@@ -20,26 +20,32 @@ df_tcp = df.filter(col("protocol") == "TCP")
 print(f" Connexions TCP : {df_tcp.count()}")
 
 # ── 4. Détecter les scans de ports ────────────────────────────────────
-# Logique : une IP qui contacte beaucoup de destinations
-# différentes en moins de 5 minutes = scan probable
-port_scans = df_tcp \
+# Le dataset fourni ne contient pas de colonne de port.
+# On utilise donc dest_ip comme proxy de cibles distinctes dans une fenêtre
+# glissante de 5 minutes pour conserver une détection batch exploitable.
+scan_key = "dest_ip"
+
+port_scans = (
+    df_tcp
     .groupBy(
         col("source_ip"),
         window(col("timestamp"), "5 minutes")
-    ) \
+    )
     .agg(
-        countDistinct("dest_ip").alias("destinations_uniques"),
+        countDistinct(scan_key).alias("distinct_targets"),
         count("*").alias("nb_connexions")
-    ) \
-    .filter(col("destinations_uniques") > 10) \
+    )
+    .filter(col("distinct_targets") > 10)
     .select(
         col("source_ip"),
         col("window.start").alias("window_start"),
         col("window.end").alias("window_end"),
-        col("destinations_uniques"),
-        col("nb_connexions")
-    ) \
-    .orderBy(col("destinations_uniques").desc())
+        col("distinct_targets"),
+        col("nb_connexions"),
+        lit(scan_key).alias("scan_basis")
+    )
+    .orderBy(col("distinct_targets").desc(), col("nb_connexions").desc())
+)
 
 print(f"\n Scans de ports détectés :")
 port_scans.show(20, truncate=False)

@@ -190,15 +190,20 @@ services:
   hbase:
     image: dajobe/hbase
     container_name: hbase
+    hostname: hbase-docker
     depends_on:
       - namenode
     ports:
+      - "9090:9090"
       - "16000:16000"
       - "16010:16010"  
       - "16020:16020"
       - "16030:16030"
+    command: sh -lc "start-hbase.sh && hbase thrift start -p 9090"
     networks:
-      - cyber-net
+      cyber-net:
+        aliases:
+          - hbase-docker
 
 # ── Spark Batch job ───────────────────────────────────────────────────
   spark-batch:

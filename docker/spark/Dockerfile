@@ -27,6 +27,8 @@ ENV PYTHONPATH=$SPARK_HOME/python:$SPARK_HOME/python/lib/py4j-0.10.9.5-src.zip
 RUN pip install --no-cache-dir \
     kafka-python==2.0.2 \
     cassandra-driver==3.28.0 \
+    happybase==1.2.0 \
+    thriftpy2==0.5.2 \
     pandas==2.0.3 \
     pyspark==3.3.0
 

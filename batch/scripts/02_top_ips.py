@@ -1,5 +1,5 @@
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, count, desc
+from pyspark.sql.functions import col, count, desc, lit, sum as spark_sum, when
 
 spark = SparkSession.builder \
     .appName("TopMaliciousIPs") \
@@ -18,14 +18,26 @@ df_threats = df.filter(
 )
 print(f" Lignes suspectes/malveillantes : {df_threats.count()}")
 
-top_ips = df_threats \
-    .groupBy("source_ip") \
+top_ips = (
+    df_threats
+    .groupBy("source_ip")
     .agg(
         count("*").alias("nb_attaques"),
-        count(col("threat_label") == "malicious").alias("nb_malicious"),
-        count(col("threat_label") == "suspicious").alias("nb_suspicious")
-    ) \
-    .orderBy(desc("nb_attaques")) \
+        spark_sum(
+            when(col("threat_label") == "malicious", lit(1)).otherwise(lit(0))
+        ).alias("nb_malicious"),
+        spark_sum(
+            when(col("threat_label") == "suspicious", lit(1)).otherwise(lit(0))
+        ).alias("nb_suspicious")
+    )
+    .orderBy(
+        desc("nb_attaques"),
+        desc("nb_malicious"),
+        desc("nb_suspicious"),
+        desc("source_ip")
+    )
+    .limit(10)
+)
    
 
 print("\n Top 10 IPs malveillantes :")
