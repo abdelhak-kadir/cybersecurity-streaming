@@ -99,6 +99,13 @@ def write_to_cassandra(stream, query_name: str):
         .option("checkpointLocation", f"{CHECKPOINT_BASE}/{query_name}") \
         .start()
 
+# ── Helper: upsert cumulative summary in ip_threat_summary ───────────────
+def _get_cassandra_session():
+    """Return a Cassandra session (called inside each executor task)."""
+    cluster = Cluster([CASSANDRA_HOST])
+    session = cluster.connect(CASSANDRA_KEYSPACE)
+    return session
+
 
 # ── DETECTION 1: Brute-force ──────────────────────────────────────────────
 # Rule: same IP gets blocked 5+ times within a 1-minute window
