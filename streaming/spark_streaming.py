@@ -15,20 +15,24 @@ import os
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col, from_json, window, count,
-    sum as spark_sum, current_timestamp, lit
+    sum as spark_sum, current_timestamp, lit ,collect_set, max as spark_max
 )
 from pyspark.sql.types import (
     StructType, StructField,
     StringType, LongType, TimestampType
 )
-
+from cassandra.cluster import Cluster
+from cassandra.query import SimpleStatement
+import time
 # ── Config ────────────────────────────────────────────────────────────────
 KAFKA_BROKER      = os.getenv("KAFKA_BROKER",   "kafka:29092")
 KAFKA_TOPIC       = "cybersecurity-logs"
 CASSANDRA_HOST    = os.getenv("CASSANDRA_HOST",  "cassandra")
 CASSANDRA_KEYSPACE = "cybersecurity"
 CASSANDRA_TABLE   = "realtime_threats"
-
+SUMMARY_TABLE      = "ip_threat_summary"
+CHECKPOINT_BASE    = "/tmp/spark-checkpoints"
+ 
 TEN_MB = 10 * 1024 * 1024  # 10 485 760 bytes
 
 
