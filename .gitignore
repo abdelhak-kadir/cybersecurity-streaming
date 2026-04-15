@@ -10,3 +10,5 @@ batch/data/*.csv
 batch/data/*.zip
 data/*.csv
 data/*.zip
+data/
+batch/data/
