@@ -6,3 +6,4 @@ venv/
 *.log
 data/
 batch/data/
+**/_temporary/
