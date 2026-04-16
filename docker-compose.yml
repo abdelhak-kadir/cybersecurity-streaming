@@ -223,78 +223,11 @@ services:
 
 
 
-
-# ── Hadoop HDFS Namenode ──────────────────────────────────────────────
-  namenode:
-    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
-    container_name: namenode
-    environment:
-      - CLUSTER_NAME=cyber-hadoop
-      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
-    ports:
-      - "9870:9870"   
-      - "9000:9000"
-    volumes:
-      - hdfs-namenode:/hadoop/dfs/name
-      - ./data:/data  
-    networks:
-      - cyber-net
-
-  # ── Hadoop HDFS Datanode ──────────────────────────────────────────────
-  datanode:
-    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
-    container_name: datanode
-    depends_on:
-      - namenode
-    environment:
-      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
-    volumes:
-      - hdfs-datanode:/hadoop/dfs/data
-    networks:
-      - cyber-net
-
-  # ── HBase ─────────────────────────────────────────────────────────────
-  hbase:
-    image: dajobe/hbase
-    container_name: hbase
-    hostname: hbase-docker
-    depends_on:
-      - namenode
-    ports:
-      - "9090:9090"
-      - "16000:16000"
-      - "16010:16010"  
-      - "16020:16020"
-      - "16030:16030"
-    command: sh -lc "start-hbase.sh && hbase thrift start -p 9090"
-    networks:
-      cyber-net:
-        aliases:
-          - hbase-docker
-
-# ── Spark Batch job ───────────────────────────────────────────────────
-  spark-batch:
-    build: ./docker/spark
-    container_name: spark-batch
-    depends_on:
-      - namenode
-      - hbase
-      - spark-master
-    volumes:
-      - ./batch/scripts:/app
-      - ./batch/data:/data
-    working_dir: /app
-    command: tail -f /dev/null
-    networks:
-      - cyber-net
-
 volumes:
   cassandra-data: {}
   hdfs-namenode: {}
   hdfs-datanode: {}
-  cassandra-data: {}
-  hdfs-namenode: {}
-  hdfs-datanode: {}
+
 
 networks:
   cyber-net:

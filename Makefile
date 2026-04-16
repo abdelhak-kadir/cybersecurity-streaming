@@ -51,6 +51,11 @@ verify:
 	docker exec -it cassandra cqlsh -e \
 	  "USE cybersecurity; SELECT * FROM realtime_threats LIMIT 20;"
 
+# ── Verify all threats are saved in Cassandra ────────────────────────────────
+verify-all:
+	docker exec -it cassandra cqlsh -e \
+	  "USE cybersecurity; SELECT * FROM realtime_threats;"
+
 # ── Watch Kafka messages live ─────────────────────────────────────────────
 watch-kafka:
 	docker exec -it kafka kafka-console-consumer \
