@@ -1,4 +1,6 @@
-.PHONY: up down logs status shell-kafka shell-cassandra shell-spark verify clean
+.PHONY: up down logs status shell-kafka shell-cassandra shell-spark shell-batch verify clean batch-load batch-analytics batch-hbase batch-all
+
+SPARK_BATCH_EXEC=docker compose exec spark-batch spark-submit --master spark://spark-master:7077
 
 # ── Start everything ──────────────────────────────────────────────────────
 up:
@@ -40,10 +42,19 @@ shell-kafka:
 shell-spark:
 	docker exec -it spark-streaming bash
 
+# ── Open shell in Batch Spark container ────────────────────────────────
+shell-batch:
+	docker exec -it spark-batch bash
+
 # ── Verify threats are saved in Cassandra ────────────────────────────────
 verify:
 	docker exec -it cassandra cqlsh -e \
 	  "USE cybersecurity; SELECT * FROM realtime_threats LIMIT 20;"
+
+# ── Verify all threats are saved in Cassandra ────────────────────────────────
+verify-all:
+	docker exec -it cassandra cqlsh -e \
+	  "USE cybersecurity; SELECT * FROM realtime_threats;"
 
 # ── Watch Kafka messages live ─────────────────────────────────────────────
 watch-kafka:
@@ -59,3 +70,21 @@ restart-producer:
 # ── Restart just the streaming job ───────────────────────────────────────
 restart-streaming:
 	docker compose restart spark-streaming
+
+# ── Batch: load historical data into HDFS ──────────────────────────────
+batch-load:
+	$(SPARK_BATCH_EXEC) /app/01_load_hdfs.py
+
+# ── Batch: run all historical analyses required by the PDF ─────────────
+batch-analytics:
+	$(SPARK_BATCH_EXEC) /app/02_top_ips.py
+	$(SPARK_BATCH_EXEC) /app/03_port_scans.py
+	$(SPARK_BATCH_EXEC) /app/03_Threat_Volume_Analysis.py
+	$(SPARK_BATCH_EXEC) /app/06_SQLi_XSS.py
+
+# ── Batch: persist batch views into HBase ──────────────────────────────
+batch-hbase:
+	$(SPARK_BATCH_EXEC) /app/07_hbase_storage.py
+
+# ── Batch: full end-to-end execution chain ─────────────────────────────
+batch-all: batch-load batch-analytics batch-hbase

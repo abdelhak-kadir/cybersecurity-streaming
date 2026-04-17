@@ -1,0 +1,73 @@
+# Batch Layer - Cybersecurity
+
+Traitement historique des logs avec HDFS + Spark batch + HBase.
+
+## Pré-requis
+
+- Docker Desktop en cours d'exécution
+- Dataset présent dans `batch/data/cybersecurity_threat_detection_logs.csv`
+
+## Démarrage de l'infrastructure
+
+Lancer toute la stack :
+
+```bash
+make up
+```
+
+Vérifier que `namenode`, `datanode`, `hbase`, `spark-master`, `spark-worker` et `spark-batch` sont démarrés :
+
+```bash
+make status
+```
+
+## Commandes batch
+
+Charger les données historiques dans HDFS :
+
+```bash
+make batch-load
+```
+
+Lancer les analyses batch demandées :
+
+```bash
+make batch-analytics
+```
+
+Stocker les vues batch dans HBase :
+
+```bash
+make batch-hbase
+```
+
+Exécuter toute la chaîne batch de bout en bout :
+
+```bash
+make batch-all
+```
+
+## Résultats produits
+
+Entrée HDFS :
+
+- `hdfs://namenode:9000/logs/cybersecurity/`
+
+Sorties batch :
+
+- `hdfs://namenode:9000/results/top_ips/`
+- `hdfs://namenode:9000/results/port_scans/`
+- `hdfs://namenode:9000/results/threat_volume/`
+- `hdfs://namenode:9000/results/attack_patterns/`
+- `hdfs://namenode:9000/alerts/detected_intrusions`
+
+Tables HBase :
+
+- `ip_reputation`
+- `attack_patterns`
+- `threat_timeline`
+
+## Remarques
+
+- La détection de port scans reste une approximation basée sur `dest_ip`, car le dataset ne contient pas de colonne de port.
+- Les scripts batch sont lancés via `spark-submit` dans le conteneur `spark-batch`.

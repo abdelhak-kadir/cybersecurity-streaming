@@ -1,8 +1,9 @@
-data/*.csv
-data/*.zip
 __pycache__/
 *.pyc
 .env
 venv/
 .DS_Store
 *.log
+data/
+batch/data/
+**/_temporary/
