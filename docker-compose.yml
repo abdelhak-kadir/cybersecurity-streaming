@@ -111,6 +111,8 @@ services:
     environment:
       - SPARK_WORKER_MEMORY=2G
       - SPARK_WORKER_CORES=2
+    volumes:
+      - ./batch/data:/data
     command: bash -c "/opt/spark/sbin/start-worker.sh spark://spark-master:7077 && tail -f /opt/spark/logs/*"
     networks:
       - cyber-net
