@@ -218,6 +218,7 @@ services:
     volumes:
       - ./batch/scripts:/app
       - ./batch/data:/data
+      - ./ml/scripts:/ml
     working_dir: /app
     command: tail -f /dev/null
     networks:
