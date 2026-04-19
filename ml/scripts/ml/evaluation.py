@@ -13,22 +13,18 @@ from pyspark.sql.functions import col
 from .features import FEATURE_COLS
 
 
-# ── Évaluateurs partagés ──────────────────────────────────────────────────
-_evaluator_acc  = MulticlassClassificationEvaluator(
-    labelCol="label", predictionCol="prediction", metricName="accuracy"
-)
-_evaluator_f1   = MulticlassClassificationEvaluator(
-    labelCol="label", predictionCol="prediction", metricName="f1"
-)
-_evaluator_prec = MulticlassClassificationEvaluator(
-    labelCol="label", predictionCol="prediction", metricName="weightedPrecision"
-)
 
-
-def compute_metrics(predictions):
-    evaluator_acc  = MulticlassClassificationEvaluator(labelCol="label", predictionCol="prediction", metricName="accuracy")
-    evaluator_f1   = MulticlassClassificationEvaluator(labelCol="label", predictionCol="prediction", metricName="f1")
-    evaluator_prec = MulticlassClassificationEvaluator(labelCol="label", predictionCol="prediction", metricName="weightedPrecision")
+def compute_metrics(predictions: DataFrame) -> dict:
+    """Retourne accuracy, f1, precision pour un DataFrame de prédictions."""
+    evaluator_acc  = MulticlassClassificationEvaluator(
+        labelCol="label", predictionCol="prediction", metricName="accuracy"
+    )
+    evaluator_f1   = MulticlassClassificationEvaluator(
+        labelCol="label", predictionCol="prediction", metricName="f1"
+    )
+    evaluator_prec = MulticlassClassificationEvaluator(
+        labelCol="label", predictionCol="prediction", metricName="weightedPrecision"
+    )
     return {
         "accuracy":  evaluator_acc.evaluate(predictions),
         "f1":        evaluator_f1.evaluate(predictions),
