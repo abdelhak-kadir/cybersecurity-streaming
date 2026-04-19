@@ -2,10 +2,129 @@ version: '3.8'
 
 services:
 
-  # ── Zookeeper (required by Kafka) ─────────────────────────────────────
+  # ══════════════════════════════════════════════════════════════════
+  #  SHARED — needed by both batch and stream
+  # ══════════════════════════════════════════════════════════════════
+
+  spark-master:
+    build: ./docker/spark
+    container_name: spark-master
+    profiles: [batch, stream]
+    environment:
+      - SPARK_MODE=master
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+    command: bash -c "/opt/spark/sbin/start-master.sh -h spark-master && tail -f /opt/spark/logs/*"
+    networks:
+      - cyber-net
+
+  # ══════════════════════════════════════════════════════════════════
+  #  BATCH profile
+  # ══════════════════════════════════════════════════════════════════
+
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: namenode
+    profiles: [batch]
+    environment:
+      - CLUSTER_NAME=cyber-hadoop
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+    ports:
+      - "9870:9870"
+      - "9000:9000"
+    volumes:
+      - hdfs-namenode:/hadoop/dfs/name
+      - ./data:/data
+    networks:
+      - cyber-net
+
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: datanode
+    profiles: [batch]
+    depends_on:
+      - namenode
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+    volumes:
+      - hdfs-datanode:/hadoop/dfs/data
+    networks:
+      - cyber-net
+
+  hbase:
+    image: dajobe/hbase
+    container_name: hbase
+    hostname: hbase-docker
+    profiles: [batch]
+    depends_on:
+      - namenode
+    ports:
+      - "9090:9090"
+      - "16000:16000"
+      - "16010:16010"
+      - "16020:16020"
+      - "16030:16030"
+    command: sh -lc "start-hbase.sh && hbase thrift start -p 9090"
+    networks:
+      cyber-net:
+        aliases:
+          - hbase-docker
+
+  spark-worker:
+    build: ./docker/spark
+    container_name: spark-worker
+    profiles: [batch]
+    depends_on:
+      - spark-master
+    environment:
+      - SPARK_WORKER_MEMORY=2G
+      - SPARK_WORKER_CORES=2
+    volumes:
+      - ./batch/data:/data
+    command: bash -c "/opt/spark/sbin/start-worker.sh spark://spark-master:7077 && tail -f /opt/spark/logs/*"
+    networks:
+      - cyber-net
+
+  spark-worker-2:
+    build: ./docker/spark
+    profiles: [batch]
+    depends_on:
+      - spark-master
+    environment:
+      - SPARK_WORKER_MEMORY=2G
+      - SPARK_WORKER_CORES=2
+    volumes:
+      - ./batch/data:/data
+    command: bash -c "/opt/spark/sbin/start-worker.sh spark://spark-master:7077 && tail -f /opt/spark/logs/*"
+    networks:
+      - cyber-net
+
+  spark-batch:
+    build: ./docker/spark
+    container_name: spark-batch
+    profiles: [batch]
+    depends_on:
+      - namenode
+      - hbase
+      - spark-master
+    volumes:
+      - ./batch/scripts:/app
+      - ./batch/data:/data
+      - ./ml/scripts:/ml
+    working_dir: /app
+    command: tail -f /dev/null
+    networks:
+      - cyber-net
+
+  # ══════════════════════════════════════════════════════════════════
+  #  STREAM profile
+  # ══════════════════════════════════════════════════════════════════
+
   zookeeper:
     image: confluentinc/cp-zookeeper:7.4.0
     container_name: zookeeper
+    profiles: [stream]
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
@@ -19,10 +138,10 @@ services:
       timeout: 5s
       retries: 5
 
-  # ── Kafka broker ──────────────────────────────────────────────────────
   kafka:
     image: confluentinc/cp-kafka:7.4.0
     container_name: kafka
+    profiles: [stream]
     depends_on:
       zookeeper:
         condition: service_healthy
@@ -44,20 +163,20 @@ services:
       timeout: 10s
       retries: 5
 
-  # ── Kafka topic setup (runs once then exits) ──────────────────────────
   kafka-setup:
     build: ./docker/kafka-setup
     container_name: kafka-setup
+    profiles: [stream]
     depends_on:
       kafka:
         condition: service_healthy
     networks:
       - cyber-net
 
-  # ── Cassandra ─────────────────────────────────────────────────────────
   cassandra:
     image: cassandra:4.1
     container_name: cassandra
+    profiles: [stream]
     ports:
       - "9042:9042"
     environment:
@@ -76,10 +195,10 @@ services:
       retries: 10
       start_period: 60s
 
-  # ── Cassandra schema init (runs once then exits) ──────────────────────
   cassandra-init:
     image: cassandra:4.1
     container_name: cassandra-init
+    profiles: [stream]
     depends_on:
       cassandra:
         condition: service_healthy
@@ -89,38 +208,23 @@ services:
     networks:
       - cyber-net
 
-# ── Spark master ──────────────────────────────────────────────────────
-  spark-master:
+  spark-worker-stream:
     build: ./docker/spark
-    container_name: spark-master
-    environment:
-      - SPARK_MODE=master
-    ports:
-      - "8080:8080"   # Spark Web UI
-      - "7077:7077"   # Spark master port
-    command: bash -c "/opt/spark/sbin/start-master.sh -h spark-master && tail -f /opt/spark/logs/*"
-    networks:
-      - cyber-net
-
-# ── Spark worker ──────────────────────────────────────────────────────
-  spark-worker:
-    build: ./docker/spark
-    container_name: spark-worker
+    container_name: spark-worker-stream
+    profiles: [stream]
     depends_on:
       - spark-master
     environment:
       - SPARK_WORKER_MEMORY=2G
       - SPARK_WORKER_CORES=2
-    volumes:
-      - ./batch/data:/data
     command: bash -c "/opt/spark/sbin/start-worker.sh spark://spark-master:7077 && tail -f /opt/spark/logs/*"
     networks:
       - cyber-net
 
-  # ── Kafka producer (sends CSV logs to Kafka) ──────────────────────────
   producer:
     build: ./docker/spark
     container_name: kafka-producer
+    profiles: [stream]
     depends_on:
       kafka-setup:
         condition: service_completed_successfully
@@ -132,10 +236,10 @@ services:
     networks:
       - cyber-net
 
-  # ── Spark Streaming detection job ────────────────────────────────────
   spark-streaming:
     build: ./docker/spark
     container_name: spark-streaming
+    profiles: [stream]
     depends_on:
       cassandra-init:
         condition: service_completed_successfully
@@ -155,74 +259,6 @@ services:
       spark_streaming.py
     networks:
       - cyber-net
-
-
-
-
-# ── Hadoop HDFS Namenode ──────────────────────────────────────────────
-  namenode:
-    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
-    container_name: namenode
-    environment:
-      - CLUSTER_NAME=cyber-hadoop
-      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
-    ports:
-      - "9870:9870"   
-      - "9000:9000"
-    volumes:
-      - hdfs-namenode:/hadoop/dfs/name
-      - ./data:/data  
-    networks:
-      - cyber-net
-
-  # ── Hadoop HDFS Datanode ──────────────────────────────────────────────
-  datanode:
-    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
-    container_name: datanode
-    depends_on:
-      - namenode
-    environment:
-      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
-    volumes:
-      - hdfs-datanode:/hadoop/dfs/data
-    networks:
-      - cyber-net
-
-  # ── HBase ─────────────────────────────────────────────────────────────
-  hbase:
-    image: dajobe/hbase
-    container_name: hbase
-    hostname: hbase-docker
-    depends_on:
-      - namenode
-    ports:
-      - "9090:9090"
-      - "16000:16000"
-      - "16010:16010"  
-      - "16020:16020"
-      - "16030:16030"
-    command: sh -lc "start-hbase.sh && hbase thrift start -p 9090"
-    networks:
-      cyber-net:
-        aliases:
-          - hbase-docker
-
-# ── Spark Batch job ───────────────────────────────────────────────────
-  spark-batch:
-    build: ./docker/spark
-    container_name: spark-batch
-    depends_on:
-      - namenode
-      - hbase
-      - spark-master
-    volumes:
-      - ./batch/scripts:/app
-      - ./batch/data:/data
-    working_dir: /app
-    command: tail -f /dev/null
-    networks:
-      - cyber-net
-
 
 
 volumes:
