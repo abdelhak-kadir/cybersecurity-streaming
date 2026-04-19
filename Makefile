@@ -1,110 +1,139 @@
-.PHONY: up down logs status shell-kafka shell-cassandra shell-spark shell-batch verify clean batch-load batch-analytics batch-hbase batch-all
+.PHONY: batch stream all down-batch down-stream down clean \
+        status logs shell-kafka shell-cassandra shell-spark shell-batch \
+        batch-load batch-analytics batch-hbase batch-all \
+        ml-train ml-predict ml-all \
+        verify verify-all watch-kafka restart-producer restart-streaming
 
 SPARK_BATCH_EXEC=docker compose exec spark-batch spark-submit --master spark://spark-master:7077
 
-# ── Start everything ──────────────────────────────────────────────────────
-up:
-	docker compose up -d --build
+# ══════════════════════════════════════════════════════════════════
+#  Start / Stop
+# ══════════════════════════════════════════════════════════════════
+
+## Start only the batch stack (HDFS + HBase + Spark workers)
+batch:
+	docker compose --profile batch up -d --build
 	@echo ""
-	@echo "Services starting... wait ~60 seconds for Cassandra to be ready."
-	@echo "Check status with: make status"
+	@echo "Batch stack starting — HDFS, HBase, Spark master+workers."
+	@echo "Run 'make batch-all' once services are up."
 
-# ── Stop everything ───────────────────────────────────────────────────────
+## Start only the streaming stack (Kafka + Cassandra + Spark streaming)
+stream:
+	docker compose --profile stream up -d --build
+	@echo ""
+	@echo "Stream stack starting — Kafka, Cassandra, Spark streaming."
+	@echo "Wait ~60 s for Cassandra, then check: make status"
+
+## Start everything (batch + stream)
+all:
+	docker compose --profile batch --profile stream up -d --build
+	@echo ""
+	@echo "Full stack starting. Wait ~60 s for Cassandra."
+
+## Stop batch containers only
+down-batch:
+	docker compose --profile batch down
+
+## Stop stream containers only
+down-stream:
+	docker compose --profile stream down
+
+## Stop all containers
 down:
-	docker compose down
+	docker compose --profile batch --profile stream down
 
-# ── Stop and remove volumes (full reset) ─────────────────────────────────
+## Full reset — remove containers, volumes, orphans
 clean:
-	docker compose down -v --remove-orphans
+	docker compose --profile batch --profile stream down -v --remove-orphans
 	@echo "All containers and volumes removed."
 
-# ── Show running containers ───────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════
+#  Observability
+# ══════════════════════════════════════════════════════════════════
+
 status:
 	docker compose ps
 
-# ── Follow logs of a service (usage: make logs s=spark-streaming) ─────────
 logs:
 	docker compose logs -f $(s)
 
-# ── Follow all logs ───────────────────────────────────────────────────────
 logs-all:
-	docker compose logs -f
+	docker compose --profile batch --profile stream logs -f
 
-# ── Open Cassandra shell ──────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════
+#  Shells
+# ══════════════════════════════════════════════════════════════════
+
 shell-cassandra:
 	docker exec -it cassandra cqlsh
 
-# ── Open Kafka shell ──────────────────────────────────────────────────────
 shell-kafka:
 	docker exec -it kafka bash
 
-# ── Open shell in Spark container ────────────────────────────────────────
 shell-spark:
 	docker exec -it spark-streaming bash
 
-# ── Open shell in Batch Spark container ────────────────────────────────
 shell-batch:
 	docker exec -it spark-batch bash
 
-# ── Verify threats are saved in Cassandra ────────────────────────────────
+# ══════════════════════════════════════════════════════════════════
+#  Streaming helpers
+# ══════════════════════════════════════════════════════════════════
+
 verify:
 	docker exec -it cassandra cqlsh -e \
 	  "USE cybersecurity; SELECT * FROM realtime_threats LIMIT 20;"
 
-# ── Verify all threats are saved in Cassandra ────────────────────────────────
 verify-all:
 	docker exec -it cassandra cqlsh -e \
 	  "USE cybersecurity; SELECT * FROM realtime_threats;"
 
-# ── Watch Kafka messages live ─────────────────────────────────────────────
 watch-kafka:
 	docker exec -it kafka kafka-console-consumer \
 	  --bootstrap-server localhost:9092 \
 	  --topic cybersecurity-logs \
 	  --from-beginning
 
-# ── Restart just the producer ─────────────────────────────────────────────
 restart-producer:
 	docker compose restart producer
 
-# ── Restart just the streaming job ───────────────────────────────────────
 restart-streaming:
 	docker compose restart spark-streaming
 
-# ── Batch: load historical data into HDFS ──────────────────────────────
+# ══════════════════════════════════════════════════════════════════
+#  Batch jobs
+# ══════════════════════════════════════════════════════════════════
+
 batch-load:
 	$(SPARK_BATCH_EXEC) /app/01_load_hdfs.py
 
-# ── Batch: run all historical analyses required by the PDF ─────────────
 batch-analytics:
 	$(SPARK_BATCH_EXEC) /app/02_top_ips.py
 	$(SPARK_BATCH_EXEC) /app/03_port_scans.py
 	$(SPARK_BATCH_EXEC) /app/03_Threat_Volume_Analysis.py
 	$(SPARK_BATCH_EXEC) /app/06_SQLi_XSS.py
 
-# ── Batch: persist batch views into HBase ──────────────────────────────
 batch-hbase:
 	$(SPARK_BATCH_EXEC) /app/07_hbase_storage.py
 
-# ── Batch: full end-to-end execution chain ─────────────────────────────
 batch-all: batch-load batch-analytics batch-hbase
 
-# ═══════════════════════════════════════════════════════════════
-#  ML Layer
-# ═══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════
+#  ML layer
+# ══════════════════════════════════════════════════════════════════
 
 ml-train:
 	docker compose exec spark-batch spark-submit \
 	  --master spark://spark-master:7077 \
 	  /ml/08_ml_threat_classification.py
-	@echo "Model saved  → hdfs://namenode:9000/models/threat_classifier"
-	@echo "Predictions  → hdfs://namenode:9000/results/ml_predictions/"
-	@echo "HBase table  → ml_predictions"
+	@echo "Model      → hdfs://namenode:9000/models/threat_classifier"
+	@echo "Predictions→ hdfs://namenode:9000/results/ml_predictions/"
+	@echo "HBase table→ ml_predictions"
 
 ml-predict:
 	docker compose exec spark-batch spark-submit \
 	  --master spark://spark-master:7077 \
 	  /ml/09_ml_predict.py
-	@echo "Predictions  → hdfs://namenode:9000/results/ml_predictions_latest/"
+	@echo "Predictions→ hdfs://namenode:9000/results/ml_predictions_latest/"
 
 ml-all: ml-train ml-predict

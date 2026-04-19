@@ -4,19 +4,22 @@ from pyspark.sql.functions import col, count, desc, lit, sum as spark_sum, when
 spark = SparkSession.builder \
     .appName("TopMaliciousIPs") \
     .config("spark.hadoop.fs.defaultFS", "hdfs://namenode:9000") \
+    .config("spark.sql.shuffle.partitions", "8") \
     .getOrCreate()
 
 spark.sparkContext.setLogLevel("ERROR")
 print(" Spark démarré")
 
 HDFS_PATH = "hdfs://namenode:9000/logs/cybersecurity/"
-df = spark.read.parquet(HDFS_PATH)
-print(f" Données chargées : {df.count()} lignes")
 
-df_threats = df.filter(
-    col("threat_label").isin(["suspicious", "malicious"])
-)
-print(f" Lignes suspectes/malveillantes : {df_threats.count()}")
+# Cache the filtered DataFrame — avoid re-scanning HDFS multiple times
+df_threats = spark.read.parquet(HDFS_PATH) \
+    .filter(col("threat_label").isin(["suspicious", "malicious"])) \
+    .cache()
+
+# Trigger a single count (materialises the cache)
+n = df_threats.count()
+print(f" Lignes suspectes/malveillantes : {n}")
 
 top_ips = (
     df_threats
@@ -38,15 +41,14 @@ top_ips = (
     )
     .limit(10)
 )
-   
 
 print("\n Top 10 IPs malveillantes :")
 top_ips.show(truncate=False)
 
-# ── 5. Sauvegarder le résultat dans HDFS ──────────────────────────────
 RESULT_PATH = "hdfs://namenode:9000/results/top_ips/"
 top_ips.write.mode("overwrite").parquet(RESULT_PATH)
 print(f" Résultats sauvegardés : {RESULT_PATH}")
 
+df_threats.unpersist()
 spark.stop()
 print(" Script 02 terminé !")

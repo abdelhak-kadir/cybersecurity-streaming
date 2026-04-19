@@ -25,12 +25,14 @@ _evaluator_prec = MulticlassClassificationEvaluator(
 )
 
 
-def compute_metrics(predictions: DataFrame) -> dict:
-    """Retourne accuracy, f1, precision pour un DataFrame de prédictions."""
+def compute_metrics(predictions):
+    evaluator_acc  = MulticlassClassificationEvaluator(labelCol="label", predictionCol="prediction", metricName="accuracy")
+    evaluator_f1   = MulticlassClassificationEvaluator(labelCol="label", predictionCol="prediction", metricName="f1")
+    evaluator_prec = MulticlassClassificationEvaluator(labelCol="label", predictionCol="prediction", metricName="weightedPrecision")
     return {
-        "accuracy":  _evaluator_acc.evaluate(predictions),
-        "f1":        _evaluator_f1.evaluate(predictions),
-        "precision": _evaluator_prec.evaluate(predictions),
+        "accuracy":  evaluator_acc.evaluate(predictions),
+        "f1":        evaluator_f1.evaluate(predictions),
+        "precision": evaluator_prec.evaluate(predictions),
     }
 
 
