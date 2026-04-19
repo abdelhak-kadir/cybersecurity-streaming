@@ -92,7 +92,7 @@ batch-all: batch-load batch-analytics batch-hbase
 # ═══════════════════════════════════════════════════════════════
 #  ML Layer
 # ═══════════════════════════════════════════════════════════════
- 
+
 ml-train:
 	docker compose exec spark-batch spark-submit \
 	  --master spark://spark-master:7077 \
@@ -100,11 +100,11 @@ ml-train:
 	@echo "Model saved  → hdfs://namenode:9000/models/threat_classifier"
 	@echo "Predictions  → hdfs://namenode:9000/results/ml_predictions/"
 	@echo "HBase table  → ml_predictions"
- 
+
 ml-predict:
 	docker compose exec spark-batch spark-submit \
 	  --master spark://spark-master:7077 \
 	  /ml/09_ml_predict.py
 	@echo "Predictions  → hdfs://namenode:9000/results/ml_predictions_latest/"
- 
-ml-all: ml-train ml-predic
+
+ml-all: ml-train ml-predict
