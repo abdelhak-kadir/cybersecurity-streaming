@@ -266,6 +266,30 @@ volumes:
   hdfs-namenode: {}
   hdfs-datanode: {}
 
+# ── Serving Layer (FastAPI) ────────────────────────────────────────────────
+  serving:
+    build: ./serving
+    container_name: serving
+    depends_on:
+      cassandra:
+        condition: service_healthy
+      hbase:
+        condition: service_started
+    ports:
+      - "8000:8000"
+    environment:
+      - CASSANDRA_HOST=cassandra
+      - CASSANDRA_PORT=9042
+      - HBASE_HOST=hbase
+      - HBASE_PORT=9090
+    networks:
+      - cyber-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
 networks:
   cyber-net:
