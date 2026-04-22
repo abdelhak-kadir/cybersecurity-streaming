@@ -137,3 +137,40 @@ ml-predict:
 	@echo "Predictions→ hdfs://namenode:9000/results/ml_predictions_latest/"
 
 ml-all: ml-train ml-predict
+
+# ── Serving layer additions for Makefile ─────────────────────────────────────
+# Add these targets to your existing Makefile
+
+# ── Start serving layer only ──────────────────────────────────────────────────
+serving-up:
+	docker compose up -d --build serving
+	@echo "Serving layer starting at http://localhost:8000"
+	@echo "API docs at: http://localhost:8000/docs"
+
+# ── Serving layer logs ────────────────────────────────────────────────────────
+serving-logs:
+	docker compose logs -f serving
+
+# ── Open API docs in browser (macOS) ─────────────────────────────────────────
+serving-docs:
+	open http://localhost:8000/docs
+
+# ── Quick API smoke-tests (requires curl) ─────────────────────────────────────
+serving-test:
+	@echo "\n── Health ──────────────────────────────────────"
+	curl -s http://localhost:8000/health | python3 -m json.tool
+	@echo "\n── Live threats (last 60 min) ───────────────────"
+	curl -s "http://localhost:8000/api/threats/live?limit=5" | python3 -m json.tool
+	@echo "\n── Top IPs ──────────────────────────────────────"
+	curl -s "http://localhost:8000/api/stats/top-ips?limit=5" | python3 -m json.tool
+	@echo "\n── Attack patterns (SQLi) ───────────────────────"
+	curl -s "http://localhost:8000/api/stats/attack-patterns?attack_type=SQLi&limit=5" | python3 -m json.tool
+	@echo "\n── Threat timeline (last 7 days) ────────────────"
+	curl -s "http://localhost:8000/api/stats/threat-timeline?days=7" | python3 -m json.tool
+	@echo "\n── Threat volume ────────────────────────────────"
+	curl -s http://localhost:8000/api/stats/threat-volume | python3 -m json.tool
+
+# ── Test IP reputation merge for a specific IP ────────────────────────────────
+# Usage: make serving-ip IP=192.168.1.10
+serving-ip:
+	curl -s "http://localhost:8000/api/ip/$(IP)" | python3 -m json.tool
