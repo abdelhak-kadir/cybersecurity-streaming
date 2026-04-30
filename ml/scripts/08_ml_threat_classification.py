@@ -83,7 +83,7 @@ importances = ml.print_feature_importances(rf_model.stages[-1])
 # ══════════════════════════════════════════════════════════════════════════════
 # 5. Cross-validation
 # ══════════════════════════════════════════════════════════════════════════════
-print("\n Cross-Validation (3 folds, sous-ensemble 30%)...")
+print("\n Cross-Validation (2 folds, sous-ensemble 2%)...")
 best_f1, best_params, _ = ml.cross_validate(train_df)
 print(f" Meilleur F1 (CV) : {best_f1:.4f}")
 print(f" Meilleurs hyperparamètres : {best_params}")
