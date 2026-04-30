@@ -16,6 +16,10 @@ Usage :
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col
 
+import json
+import os
+from datetime import datetime
+
 import ml
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -24,6 +28,7 @@ import ml
 HDFS_PATH  = "hdfs://namenode:9000/logs/cybersecurity/"
 MODEL_PATH = "hdfs://namenode:9000/models/threat_classifier"
 PREDS_PATH = "hdfs://namenode:9000/results/ml_predictions/"
+SUMMARY_PATH = os.getenv("ML_SUMMARY_PATH", "/data/ml_summary.json")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Spark session
@@ -56,7 +61,9 @@ print(f" Lignes après nettoyage : {df.count():,}")
 # 2. Split train / test
 # ══════════════════════════════════════════════════════════════════════════════
 train_df, test_df = df.randomSplit([0.8, 0.2], seed=42)
-print(f"\n Split : {train_df.count():,} train / {test_df.count():,} test")
+train_count = train_df.count()
+test_count = test_df.count()
+print(f"\n Split : {train_count:,} train / {test_count:,} test")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 3. Entraînement
@@ -96,14 +103,52 @@ preds_full   = rf_model.transform(df)
 preds_labeled = ml.add_predicted_labels(preds_full, rf_model.stages[0])
 
 print(" Résumé des prédictions :")
-preds_labeled.groupBy("predicted_label").count() \
-    .orderBy("count", ascending=False).show()
+prediction_counts = preds_labeled.groupBy("predicted_label").count() \
+    .orderBy("count", ascending=False)
+prediction_counts.show()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 7. Sauvegarde
 # ══════════════════════════════════════════════════════════════════════════════
 ml.save_predictions(preds_labeled, PREDS_PATH)
 ml.save_model(rf_model, MODEL_PATH)
+
+summary = {
+    "status": "trained",
+    "trained_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+    "dataset_rows": total,
+    "train_rows": train_count,
+    "test_rows": test_count,
+    "model_path": MODEL_PATH,
+    "predictions_path": PREDS_PATH,
+    "metrics": [
+        {
+            "model": "Random Forest",
+            "accuracy": metrics_rf["accuracy"],
+            "f1_score": metrics_rf["f1"],
+            "precision": metrics_rf["precision"],
+        },
+        {
+            "model": "Logistic Regression",
+            "accuracy": metrics_lr["accuracy"],
+            "f1_score": metrics_lr["f1"],
+            "precision": metrics_lr["precision"],
+        },
+    ],
+    "cv_best_f1": best_f1,
+    "prediction_counts": [
+        {"predicted_label": row["predicted_label"], "count": row["count"]}
+        for row in prediction_counts.collect()
+    ],
+    "feature_importance": [
+        {"feature": feature, "importance": importance}
+        for feature, importance in importances
+    ],
+}
+os.makedirs(os.path.dirname(SUMMARY_PATH), exist_ok=True)
+with open(SUMMARY_PATH, "w", encoding="utf-8") as fh:
+    json.dump(summary, fh, indent=2)
+print(f" Résumé ML sauvegardé : {SUMMARY_PATH}")
 
 wrong_preds = preds_labeled \
     .filter(col("threat_label") != col("predicted_label")) \

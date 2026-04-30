@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import datetime
 
@@ -69,3 +69,36 @@ class ThreatTimelinePoint(BaseModel):
 class ThreatVolumePoint(BaseModel):
     threat_label: str
     total_bytes: float
+
+
+class MLMetricPoint(BaseModel):
+    model: str
+    accuracy: float
+    f1_score: float
+    precision: float
+
+
+class MLPredictionCount(BaseModel):
+    predicted_label: str
+    count: int
+
+
+class MLFeatureImportance(BaseModel):
+    feature: str
+    importance: float
+
+
+class MLSummary(BaseModel):
+    model_config = {"protected_namespaces": ()}
+
+    status: str
+    trained_at: Optional[str] = None
+    dataset_rows: int = 0
+    train_rows: int = 0
+    test_rows: int = 0
+    model_path: Optional[str] = None
+    predictions_path: Optional[str] = None
+    cv_best_f1: Optional[float] = None
+    metrics: list[MLMetricPoint] = Field(default_factory=list)
+    prediction_counts: list[MLPredictionCount] = Field(default_factory=list)
+    feature_importance: list[MLFeatureImportance] = Field(default_factory=list)

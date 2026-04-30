@@ -5,6 +5,7 @@ All Cassandra and HBase I/O is mocked — no live infrastructure needed.
 import types
 from contextlib import contextmanager
 from datetime import datetime
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -312,3 +313,47 @@ def test_threat_volume(client_factory):
         r = c.get("/api/stats/threat-volume")
         assert r.status_code == 200
         assert r.json()[0]["total_bytes"] == 1024.0
+
+
+# ── /api/ml/* ─────────────────────────────────────────────────────────────
+
+def test_ml_summary_missing_returns_not_trained(client_factory, tmp_path):
+    import main as app_module
+    with patch.object(app_module, "ML_SUMMARY_PATH", str(tmp_path / "missing.json")):
+        with client_factory() as c:
+            r = c.get("/api/ml/summary")
+            assert r.status_code == 200
+            assert r.json()["status"] == "not_trained"
+
+
+def test_ml_endpoints_return_summary_sections(client_factory, tmp_path):
+    import main as app_module
+    summary_path = tmp_path / "ml_summary.json"
+    summary_path.write_text(json.dumps({
+        "status": "trained",
+        "trained_at": "2026-04-30T17:47:00Z",
+        "dataset_rows": 6000000,
+        "train_rows": 4798637,
+        "test_rows": 1201363,
+        "model_path": "hdfs://namenode:9000/models/threat_classifier",
+        "predictions_path": "hdfs://namenode:9000/results/ml_predictions/",
+        "cv_best_f1": 0.9475,
+        "metrics": [
+            {"model": "Random Forest", "accuracy": 0.9695, "f1_score": 0.9664, "precision": 0.9674}
+        ],
+        "prediction_counts": [
+            {"predicted_label": "malicious", "count": 75817}
+        ],
+        "feature_importance": [
+            {"feature": "path_length", "importance": 0.7546},
+            {"feature": "has_sqli", "importance": 0.1093},
+        ],
+    }))
+
+    with patch.object(app_module, "ML_SUMMARY_PATH", str(summary_path)):
+        with client_factory() as c:
+            assert c.get("/api/ml/summary").json()["dataset_rows"] == 6000000
+            assert c.get("/api/ml/metrics").json()[0]["f1_score"] == 0.9664
+            assert c.get("/api/ml/prediction-counts").json()[0]["predicted_label"] == "malicious"
+            features = c.get("/api/ml/feature-importance?limit=1").json()
+            assert features == [{"feature": "path_length", "importance": 0.7546}]

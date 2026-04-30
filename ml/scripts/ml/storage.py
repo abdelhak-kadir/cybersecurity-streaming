@@ -60,8 +60,8 @@ def save_to_hbase(metrics_rf: dict, metrics_lr: dict,
             b"metrics:precision":  f"{metrics_rf['precision']:.6f}".encode(),
             b"metrics:cv_best_f1": f"{best_f1:.6f}".encode(),
             b"metrics:model_type": b"RandomForestClassifier",
-            b"metrics:num_trees":  b"100",
-            b"metrics:max_depth":  b"10",
+            b"metrics:num_trees":  b"30",
+            b"metrics:max_depth":  b"8",
             b"metrics:model_path": model_path.encode(),
         })
 
@@ -71,7 +71,7 @@ def save_to_hbase(metrics_rf: dict, metrics_lr: dict,
             b"metrics:f1_score":   f"{metrics_lr['f1']:.6f}".encode(),
             b"metrics:precision":  f"{metrics_lr['precision']:.6f}".encode(),
             b"metrics:model_type": b"LogisticRegression",
-            b"metrics:max_iter":   b"100",
+            b"metrics:max_iter":   b"40",
             b"metrics:reg_param":  b"0.01",
         })
 

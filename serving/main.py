@@ -1,5 +1,7 @@
 from contextlib import asynccontextmanager
 from datetime import datetime
+import json
+import os
 import time as _time
 from typing import Optional
 
@@ -15,6 +17,10 @@ from models.schemas import (
     IPReputationResponse,
     LiveThreat,
     LiveThreatsResponse,
+    MLFeatureImportance,
+    MLMetricPoint,
+    MLPredictionCount,
+    MLSummary,
     RecentEvent,
     ThreatTimelinePoint,
     ThreatVolumePoint,
@@ -26,6 +32,18 @@ hbase: Optional[HBaseClient] = None
 _geo_cache: dict = {}
 _geo_cache_time: float = 0.0
 _GEO_TTL = 3600
+ML_SUMMARY_PATH = os.getenv("ML_SUMMARY_PATH", "/data/ml_summary.json")
+
+
+def load_ml_summary() -> MLSummary:
+    if not os.path.exists(ML_SUMMARY_PATH):
+        return MLSummary(status="not_trained")
+    try:
+        with open(ML_SUMMARY_PATH, encoding="utf-8") as fh:
+            return MLSummary(**json.load(fh))
+    except Exception as exc:
+        print(f"[ml] summary unavailable: {exc}")
+        return MLSummary(status="unavailable")
 
 
 def geolocate_batch(ips: list) -> dict:
@@ -234,3 +252,23 @@ def get_threat_volume(limit: int = Query(50, ge=1, le=200)):
         raise HTTPException(status_code=503, detail="HBase unavailable")
     rows = hbase.get_threat_volume(limit=limit)
     return [ThreatVolumePoint(threat_label=r["threat_label"], total_bytes=r["total_bytes"]) for r in rows]
+
+
+@app.get("/api/ml/summary", response_model=MLSummary)
+def get_ml_summary():
+    return load_ml_summary()
+
+
+@app.get("/api/ml/metrics", response_model=list[MLMetricPoint])
+def get_ml_metrics():
+    return load_ml_summary().metrics
+
+
+@app.get("/api/ml/prediction-counts", response_model=list[MLPredictionCount])
+def get_ml_prediction_counts():
+    return load_ml_summary().prediction_counts
+
+
+@app.get("/api/ml/feature-importance", response_model=list[MLFeatureImportance])
+def get_ml_feature_importance(limit: int = Query(13, ge=1, le=50)):
+    return load_ml_summary().feature_importance[:limit]

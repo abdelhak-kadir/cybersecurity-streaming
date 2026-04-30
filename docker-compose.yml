@@ -289,6 +289,9 @@ services:
       - CASSANDRA_PORT=9042
       - HBASE_HOST=hbase
       - HBASE_PORT=9090
+      - ML_SUMMARY_PATH=/data/ml_summary.json
+    volumes:
+      - ./data:/data:ro
     networks:
       - cyber-net
     healthcheck:
