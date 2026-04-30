@@ -2,13 +2,27 @@
         status logs shell-kafka shell-cassandra shell-spark shell-batch \
         batch-load batch-analytics batch-hbase batch-all \
         ml-train ml-predict ml-all \
-        verify verify-all watch-kafka restart-producer restart-streaming
+        verify verify-all watch-kafka restart-producer restart-streaming \
+        test reset-schema serving-up serving-logs serving-docs serving-test serving-ip \
+        grafana-up grafana-open
 
 SPARK_BATCH_EXEC=docker compose exec spark-batch spark-submit --master spark://spark-master:7077
 
 # ══════════════════════════════════════════════════════════════════
 #  Start / Stop
 # ══════════════════════════════════════════════════════════════════
+
+## DESTRUCTIVE: drop and recreate Cassandra tables (requires running stack)
+## Useful after a schema change; normal restarts do NOT need this.
+reset-schema:
+	@echo "WARNING: this will drop all Cassandra threat data. Ctrl-C to abort."
+	@sleep 3
+	docker exec -i cassandra cqlsh < docker/cassandra-reset.cql
+	@echo "Schema reset complete."
+
+## Run unit tests inside Docker (no live Cassandra/HBase needed)
+test:
+	docker compose --profile test run --rm test
 
 ## Start only the batch stack (HDFS + HBase + Spark workers)
 batch:
@@ -143,9 +157,16 @@ ml-all: ml-train ml-predict
 
 # ── Start serving layer only ──────────────────────────────────────────────────
 serving-up:
-	docker compose up -d --build serving
+	docker compose --profile serve up -d --build serving
 	@echo "Serving layer starting at http://localhost:8000"
 	@echo "API docs at: http://localhost:8000/docs"
+
+grafana-up:
+	docker compose --profile serve up -d --build grafana
+	@echo "Grafana starting at http://localhost:3000 (admin / admin)"
+
+grafana-open:
+	open http://localhost:3000
 
 # ── Serving layer logs ────────────────────────────────────────────────────────
 serving-logs:

@@ -1,0 +1,10 @@
+apiVersion: 1
+
+datasources:
+  - name: CyberAPI
+    uid: CyberAPI
+    type: yesoreyeram-infinity-datasource
+    access: proxy
+    isDefault: true
+    jsonData:
+      baseURL: "http://serving:8000"

@@ -26,7 +26,7 @@ services:
   namenode:
     image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
     container_name: namenode
-    profiles: [batch]
+    profiles: [batch, serve]
     environment:
       - CLUSTER_NAME=cyber-hadoop
       - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
@@ -56,7 +56,7 @@ services:
     image: dajobe/hbase
     container_name: hbase
     hostname: hbase-docker
-    profiles: [batch]
+    profiles: [batch, serve]
     depends_on:
       - namenode
     ports:
@@ -81,7 +81,7 @@ services:
       - SPARK_WORKER_MEMORY=2G
       - SPARK_WORKER_CORES=2
     volumes:
-      - ./batch/data:/data
+      - ./data:/data
     command: bash -c "/opt/spark/sbin/start-worker.sh spark://spark-master:7077 && tail -f /opt/spark/logs/*"
     networks:
       - cyber-net
@@ -95,7 +95,7 @@ services:
       - SPARK_WORKER_MEMORY=2G
       - SPARK_WORKER_CORES=2
     volumes:
-      - ./batch/data:/data
+      - ./data:/data
     command: bash -c "/opt/spark/sbin/start-worker.sh spark://spark-master:7077 && tail -f /opt/spark/logs/*"
     networks:
       - cyber-net
@@ -110,7 +110,7 @@ services:
       - spark-master
     volumes:
       - ./batch/scripts:/app
-      - ./batch/data:/data
+      - ./data:/data
       - ./ml/scripts:/ml
     working_dir: /app
     command: tail -f /dev/null
@@ -176,7 +176,7 @@ services:
   cassandra:
     image: cassandra:4.1
     container_name: cassandra
-    profiles: [stream]
+    profiles: [stream, serve]
     ports:
       - "9042:9042"
     environment:
@@ -198,7 +198,7 @@ services:
   cassandra-init:
     image: cassandra:4.1
     container_name: cassandra-init
-    profiles: [stream]
+    profiles: [stream, serve]
     depends_on:
       cassandra:
         condition: service_healthy
@@ -231,8 +231,12 @@ services:
     volumes:
       - ./streaming:/app
       - ./data:/data
+    environment:
+      - CSV_FILE=/data/cybersecurity_threat_detection_logs.csv
+      - SEND_DELAY=0.01
+      - MAX_MESSAGES=0
     working_dir: /app
-    command: python3 kafka_producer.py
+    command: python3 -u kafka_producer.py
     networks:
       - cyber-net
 
@@ -260,19 +264,22 @@ services:
     networks:
       - cyber-net
 
-
-volumes:
-  cassandra-data: {}
-  hdfs-namenode: {}
-  hdfs-datanode: {}
+# ── Test runner (unit tests, no live infra required) ─────────────────────
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    profiles: [test]
+    command: python -m pytest tests/ -v --tb=short
 
 # ── Serving Layer (FastAPI) ────────────────────────────────────────────────
   serving:
     build: ./serving
     container_name: serving
+    profiles: [serve]
     depends_on:
-      cassandra:
-        condition: service_healthy
+      cassandra-init:
+        condition: service_completed_successfully
       hbase:
         condition: service_started
     ports:
@@ -285,11 +292,37 @@ volumes:
     networks:
       - cyber-net
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3).read()"]
       interval: 15s
       timeout: 5s
       retries: 5
       start_period: 20s
+
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: grafana
+    profiles: [serve]
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_INSTALL_PLUGINS=yesoreyeram-infinity-datasource
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      serving:
+        condition: service_healthy
+    networks:
+      - cyber-net
+
+
+volumes:
+  cassandra-data: {}
+  hdfs-namenode: {}
+  hdfs-datanode: {}
+  grafana-data: {}
 
 networks:
   cyber-net:

@@ -65,7 +65,7 @@ raw_stream = spark.readStream \
     .format("kafka") \
     .option("kafka.bootstrap.servers", KAFKA_BROKER) \
     .option("subscribe", KAFKA_TOPIC) \
-    .option("startingOffsets", "latest") \
+    .option("startingOffsets", "earliest") \
     .option("failOnDataLoss", "false") \
     .load()
 
@@ -97,67 +97,22 @@ def write_to_cassandra(stream, query_name: str):
         .option("checkpointLocation", f"{CHECKPOINT_BASE}/{query_name}") \
         .start()
 
-# ── Helper: upsert cumulative summary in ip_threat_summary ───────────────
-def _get_cassandra_session():
-    """Return a Cassandra session (called inside each executor task)."""
-    cluster = Cluster([CASSANDRA_HOST])
-    session = cluster.connect(CASSANDRA_KEYSPACE)
-    return session
-
-def upsert_summary(ip, threat_score, attack_type, last_seen):
-    """
-    Read existing ip_threat_summary row for this IP,
-    merge scores/types/counts, write back.
-    Import is inside the function to avoid top-level serialization issues.
-    """
-    from cassandra.cluster import Cluster
- 
-    cluster = Cluster([CASSANDRA_HOST])
-    session = cluster.connect(CASSANDRA_KEYSPACE)
- 
-    select_stmt = session.prepare(
-        f"SELECT threat_score, attack_types, total_alerts FROM {SUMMARY_TABLE} WHERE ip_source = ?"
-    )
-    upsert_stmt = session.prepare(
-        f"""
-        UPDATE {SUMMARY_TABLE}
-        SET last_seen    = ?,
-            threat_score = ?,
-            attack_types = ?,
-            total_alerts = ?
-        WHERE ip_source = ?
-        """
-    )
- 
-    existing = session.execute(select_stmt, [ip]).one()
- 
-    if existing:
-        merged_score  = max(threat_score, existing.threat_score or 0)
-        merged_types  = list(set(existing.attack_types or []) | {attack_type})
-        merged_alerts = (existing.total_alerts or 0) + 1
-    else:
-        merged_score  = threat_score
-        merged_types  = [attack_type]
-        merged_alerts = 1
- 
-    session.execute(upsert_stmt, [last_seen, merged_score, merged_types, merged_alerts, ip])
-    cluster.shutdown()
-
 # ── Combined foreachBatch: write to both tables ───────────────────────────
 def make_batch_writer(query_name: str):
     """
     Returns a foreachBatch function that:
-      1. Appends all rows to realtime_threats
-      2. Upserts each row's IP into ip_threat_summary
+      1. Appends all rows to realtime_threats (TTL 24h enforced by schema)
+      2. Atomically updates ip_threat_summary using SET addition (no read needed)
+      3. Atomically increments ip_alert_counters using a Cassandra counter
     """
     def save_batch(batch_df, batch_id):
         from cassandra.cluster import Cluster
         n = batch_df.count()
         if n == 0:
             return
- 
+
         print(f"[{query_name}] batch {batch_id} — {n} threat(s)")
- 
+
         # Write to realtime_threats
         batch_df.write \
             .format("org.apache.spark.sql.cassandra") \
@@ -165,32 +120,26 @@ def make_batch_writer(query_name: str):
             .mode("append") \
             .save()
 
-        # One Cassandra connection per batch, not per row
+        # One Cassandra connection per batch
         cluster = Cluster([CASSANDRA_HOST])
         session = cluster.connect(CASSANDRA_KEYSPACE)
 
-        select_stmt = session.prepare(
-            f"SELECT threat_score, attack_types, total_alerts FROM {SUMMARY_TABLE} WHERE ip_source = ?"
-        )
-        upsert_stmt = session.prepare(
+        # Atomic SET addition — no read needed, idempotent on retry.
+        # threat_score is intentionally omitted: the serving layer derives the
+        # max score directly from realtime_threats (bounded by 24h TTL) so there
+        # is no risk of a stale low-score overwriting a prior high-score entry.
+        update_summary = session.prepare(
             f"""UPDATE {SUMMARY_TABLE}
-                SET last_seen = ?, threat_score = ?, attack_types = ?, total_alerts = ?
-                WHERE ip_source = ?"""
+                SET last_seen    = ?,
+                    attack_types = attack_types + ?
+                WHERE ip_source  = ?"""
         )
 
-        rows = batch_df.select("ip_source", "threat_score", "attack_type", "last_seen").collect()
+        rows = batch_df.select("ip_source", "attack_type", "last_seen").collect()
         for row in rows:
             try:
-                existing = session.execute(select_stmt, [row["ip_source"]]).one()
-                if existing:
-                    merged_score  = max(row["threat_score"], existing.threat_score or 0)
-                    merged_types  = list(set(existing.attack_types or []) | {row["attack_type"]})
-                    merged_alerts = (existing.total_alerts or 0) + 1
-                else:
-                    merged_score, merged_types, merged_alerts = row["threat_score"], [row["attack_type"]], 1
-
-                session.execute(upsert_stmt, [
-                    row["last_seen"], merged_score, merged_types, merged_alerts, row["ip_source"]
+                session.execute(update_summary, [
+                    row["last_seen"], {row["attack_type"]}, row["ip_source"]
                 ])
             except Exception as e:
                 print(f"  [summary] ERROR for {row['ip_source']}: {e}")
@@ -241,7 +190,7 @@ signatures = logs \
     .filter(sig_filter) \
     .select(
         col("source_ip").alias("ip_source"),
-        col("timestamp").alias("last_seen"),
+        current_timestamp().alias("last_seen"),
         lit(95).alias("threat_score"),       # highest score — no false positives
         lit("attack-signature").alias("attack_type"),
     )

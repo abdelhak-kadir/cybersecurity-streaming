@@ -1,0 +1,15 @@
+FROM python:3.9-slim
+
+WORKDIR /workspace
+
+# DB clients use lazy imports (happybase/cassandra-driver imported inside __init__)
+# so only the lightweight test requirements are needed here.
+COPY tests/requirements.txt tests/requirements.txt
+RUN pip install --no-cache-dir -r tests/requirements.txt
+
+# Copy source trees needed by the tests
+COPY serving/ serving/
+COPY tests/   tests/
+COPY docker/  docker/
+
+CMD ["python", "-m", "pytest", "tests/", "-v", "--tb=short"]
