@@ -2,11 +2,12 @@
 spark_streaming.py
 ------------------
 Consumes logs from Kafka topic 'cybersecurity-logs' and applies
-3 real-time detection rules:
+4 real-time detection rules:
 
   1. Brute-force    — 5+ blocked requests from same IP in 1 minute
   2. Attack signatures — known tool strings in user_agent / request_path
   3. Volume anomaly — >10 MB transferred by same IP in 10 seconds
+  4. Port scan      — Nmap/Masscan-style reconnaissance from same IP
 
 Detected threats are written to Cassandra table: cybersecurity.realtime_threats
 """
@@ -15,7 +16,7 @@ import os
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col, from_json, window, count,
-    sum as spark_sum, current_timestamp, lit 
+    sum as spark_sum, current_timestamp, lit, lower
 )
 from pyspark.sql.types import (
     StructType, StructField,
@@ -29,9 +30,15 @@ CASSANDRA_HOST    = os.getenv("CASSANDRA_HOST",  "cassandra")
 CASSANDRA_KEYSPACE = "cybersecurity"
 CASSANDRA_TABLE   = "realtime_threats"
 SUMMARY_TABLE      = "ip_threat_summary"
-CHECKPOINT_BASE    = "/tmp/spark-checkpoints"
+CORRELATION_TABLE  = "correlated_attacks"
+CHECKPOINT_BASE    = os.getenv("CHECKPOINT_BASE", "/tmp/spark-checkpoints-v3")
  
 TEN_MB = 10 * 1024 * 1024  # 10 485 760 bytes
+MAX_THREATS_PER_BATCH = int(os.getenv("MAX_THREATS_PER_BATCH", "2000"))
+CORRELATION_WINDOW_SECONDS = int(os.getenv("CORRELATION_WINDOW_SECONDS", "600"))
+CORRELATION_SCORE = 100
+RECON_STAGE = "port-scan"
+EXPLOIT_STAGES = {"attack-signature", "brute-force", "data-exfiltration"}
 
 
 # ── Spark session ─────────────────────────────────────────────────────────
@@ -103,13 +110,18 @@ def make_batch_writer(query_name: str):
     Returns a foreachBatch function that:
       1. Appends all rows to realtime_threats (TTL 24h enforced by schema)
       2. Atomically updates ip_threat_summary using SET addition (no read needed)
-      3. Atomically increments ip_alert_counters using a Cassandra counter
+      3. Detects multi-step attacks for IPs touched by this micro-batch
     """
     def save_batch(batch_df, batch_id):
         from cassandra.cluster import Cluster
+        from datetime import datetime, timedelta
         n = batch_df.count()
         if n == 0:
             return
+        if n > MAX_THREATS_PER_BATCH:
+            print(f"[{query_name}] batch {batch_id} — capping {n} threat(s) to {MAX_THREATS_PER_BATCH}")
+            batch_df = batch_df.orderBy(col("last_seen").desc()).limit(MAX_THREATS_PER_BATCH)
+            n = batch_df.count()
 
         print(f"[{query_name}] batch {batch_id} — {n} threat(s)")
 
@@ -134,6 +146,22 @@ def make_batch_writer(query_name: str):
                     attack_types = attack_types + ?
                 WHERE ip_source  = ?"""
         )
+        select_recent = session.prepare(
+            f"""SELECT last_seen, attack_type
+                FROM {CASSANDRA_TABLE}
+                WHERE ip_source = ?
+                LIMIT 100"""
+        )
+        insert_correlated = session.prepare(
+            f"""INSERT INTO {CORRELATION_TABLE}
+                (ip_source, last_seen, first_seen, stages, threat_score)
+                VALUES (?, ?, ?, ?, ?)"""
+        )
+        insert_realtime = session.prepare(
+            f"""INSERT INTO {CASSANDRA_TABLE}
+                (ip_source, last_seen, threat_score, attack_type)
+                VALUES (?, ?, ?, ?)"""
+        )
 
         rows = batch_df.select("ip_source", "attack_type", "last_seen").collect()
         for row in rows:
@@ -143,6 +171,34 @@ def make_batch_writer(query_name: str):
                 ])
             except Exception as e:
                 print(f"  [summary] ERROR for {row['ip_source']}: {e}")
+
+        for ip in {row["ip_source"] for row in rows}:
+            try:
+                recent_rows = list(session.execute(select_recent, [ip]))
+                cutoff = datetime.utcnow() - timedelta(seconds=CORRELATION_WINDOW_SECONDS)
+                recent_rows = [
+                    r for r in recent_rows
+                    if r.last_seen and r.last_seen.replace(tzinfo=None) >= cutoff
+                ]
+                stages = {r.attack_type for r in recent_rows if r.attack_type}
+                if RECON_STAGE not in stages or not (stages & EXPLOIT_STAGES):
+                    continue
+                event_times = [r.last_seen for r in recent_rows if r.last_seen]
+                first_seen = min(event_times)
+                last_seen = max(event_times)
+                correlated_stages = stages - {"multi-step-attack"}
+                session.execute(insert_correlated, [
+                    ip, last_seen, first_seen, correlated_stages, CORRELATION_SCORE
+                ])
+                session.execute(insert_realtime, [
+                    ip, last_seen, CORRELATION_SCORE, "multi-step-attack"
+                ])
+                session.execute(update_summary, [
+                    last_seen, {"multi-step-attack"}, ip
+                ])
+                print(f"  [correlation] {ip}: {sorted(correlated_stages)}")
+            except Exception as e:
+                print(f"  [correlation] ERROR for {ip}: {e}")
 
         cluster.shutdown()
 
@@ -229,6 +285,42 @@ q3 = volume_anomaly.writeStream \
 print("Detection 3 started: volume anomaly")
 
 
+# ── DETECTION 4: Port scan / reconnaissance ──────────────────────────────
+# Dataset has no destination port column, so live reconnaissance is inferred
+# from scanner user-agents (Nmap/Masscan) and repeated blocked network probes.
+scan_filter = (
+    lower(col("user_agent")).contains("nmap")
+    | lower(col("user_agent")).contains("masscan")
+    | (
+        (col("action") == "blocked")
+        & col("protocol").isin("TCP", "UDP", "ICMP")
+    )
+)
+
+port_scan = logs \
+    .filter(scan_filter) \
+    .groupBy(
+        window(col("timestamp"), "1 minute"),
+        col("source_ip")
+    ) \
+    .agg(count("*").alias("probe_count")) \
+    .filter(col("probe_count") >= 3) \
+    .select(
+        col("source_ip").alias("ip_source"),
+        current_timestamp().alias("last_seen"),
+        lit(75).alias("threat_score"),
+        lit("port-scan").alias("attack_type"),
+    )
+
+q4 = port_scan.writeStream \
+    .outputMode("update") \
+    .foreachBatch(make_batch_writer("port-scan-stream")) \
+    .queryName("port-scan-stream") \
+    .option("checkpointLocation", f"{CHECKPOINT_BASE}/port-scan-stream") \
+    .start()
+print("Detection 4 started: port scan")
+
+
 # ── Wait for all queries to finish ────────────────────────────────────────
-print("All 3 detection streams are running. Press Ctrl+C to stop.")
+print("All 4 detection streams are running. Press Ctrl+C to stop.")
 spark.streams.awaitAnyTermination()

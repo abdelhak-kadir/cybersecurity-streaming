@@ -29,3 +29,15 @@ CREATE TABLE IF NOT EXISTS ip_threat_summary (
     last_seen    TIMESTAMP,
     attack_types SET<TEXT>
 );
+
+-- Correlated multi-step attacks detected by spark_streaming.py.
+-- Stores the stages behind the final "multi-step-attack" alert for dashboard drill-down.
+CREATE TABLE IF NOT EXISTS correlated_attacks (
+    ip_source    TEXT,
+    last_seen    TIMESTAMP,
+    first_seen   TIMESTAMP,
+    stages       SET<TEXT>,
+    threat_score INT,
+    PRIMARY KEY (ip_source, last_seen)
+) WITH CLUSTERING ORDER BY (last_seen DESC)
+  AND default_time_to_live = 86400;

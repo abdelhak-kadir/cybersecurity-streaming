@@ -12,6 +12,7 @@ from db.cassandra_client import CassandraClient
 from db.hbase_client import HBaseClient
 from models.schemas import (
     AttackPattern,
+    CorrelatedAttack,
     GeoThreat,
     HealthResponse,
     IPReputationResponse,
@@ -166,7 +167,7 @@ def get_live_threats(
         )
         for r in rows
     ]
-    if not threats and hbase:
+    if not threats and hbase and attack_type is None:
         now = datetime.utcnow()
         threats = [
             LiveThreat(
@@ -179,6 +180,26 @@ def get_live_threats(
             if int(row["reputation_score"]) >= min_score
         ]
     return LiveThreatsResponse(threats=threats, count=len(threats))
+
+
+@app.get("/api/threats/correlated", response_model=list[CorrelatedAttack])
+def get_correlated_attacks(
+    minutes: int = Query(60, ge=1, le=1440),
+    limit: int = Query(100, ge=1, le=1000),
+):
+    if not cassandra:
+        raise HTTPException(status_code=503, detail="Cassandra unavailable")
+    rows = cassandra.get_correlated_attacks(minutes=minutes, limit=limit)
+    return [
+        CorrelatedAttack(
+            ip_source=r.ip_source,
+            first_seen=r.first_seen,
+            last_seen=r.last_seen,
+            stages=sorted(r.stages or []),
+            threat_score=r.threat_score,
+        )
+        for r in rows
+    ]
 
 
 @app.get("/api/stats/top-ips", response_model=list[TopIP])

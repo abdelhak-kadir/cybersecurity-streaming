@@ -34,6 +34,17 @@ def test_realtime_threats_ttl_on_correct_table():
     assert "default_time_to_live = 86400" in block
 
 
+def test_correlated_attacks_has_24h_ttl():
+    cql = load_cql()
+    create_pos = cql.find("CREATE TABLE IF NOT EXISTS correlated_attacks")
+    assert create_pos != -1
+    block_after_create = cql[create_pos:]
+    next_create = block_after_create.find("CREATE TABLE", 1)
+    block = block_after_create if next_create == -1 else block_after_create[:next_create]
+    assert "default_time_to_live = 86400" in block
+    assert "stages       SET<TEXT>" in block
+
+
 def test_attack_types_is_set_not_list():
     cql = load_cql()
     # Must use SET<TEXT> so additions are idempotent

@@ -55,6 +55,19 @@ def main():
         )
     """)
     print("Table created: ip_threat_summary")
+
+    session.execute("""
+        CREATE TABLE IF NOT EXISTS correlated_attacks (
+            ip_source    TEXT,
+            last_seen    TIMESTAMP,
+            first_seen   TIMESTAMP,
+            stages       SET<TEXT>,
+            threat_score INT,
+            PRIMARY KEY (ip_source, last_seen)
+        ) WITH CLUSTERING ORDER BY (last_seen DESC)
+          AND default_time_to_live = 86400
+    """)
+    print("Table created: correlated_attacks")
     print("Cassandra setup complete.")
 
 

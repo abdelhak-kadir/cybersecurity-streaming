@@ -38,6 +38,14 @@ class LiveThreatsResponse(BaseModel):
     count: int
 
 
+class CorrelatedAttack(BaseModel):
+    ip_source: str
+    first_seen: Optional[datetime]
+    last_seen: Optional[datetime]
+    stages: list[str]
+    threat_score: int
+
+
 class TopIP(BaseModel):
     ip: str
     reputation_score: float

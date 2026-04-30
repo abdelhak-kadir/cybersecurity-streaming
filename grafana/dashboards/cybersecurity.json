@@ -1260,11 +1260,133 @@
       ],
       "title": "ML Artifacts",
       "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "CyberAPI"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 100
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "threat_score"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "mode": "basic",
+                  "type": "color-background"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 42
+      },
+      "id": 12,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "last_seen"
+          }
+        ]
+      },
+      "pluginVersion": "10.4.2",
+      "targets": [
+        {
+          "columns": [
+            {
+              "selector": "ip_source",
+              "text": "ip_source",
+              "type": "string"
+            },
+            {
+              "selector": "stages",
+              "text": "stages",
+              "type": "string"
+            },
+            {
+              "selector": "threat_score",
+              "text": "threat_score",
+              "type": "number"
+            },
+            {
+              "selector": "first_seen",
+              "text": "first_seen",
+              "type": "timestamp"
+            },
+            {
+              "selector": "last_seen",
+              "text": "last_seen",
+              "type": "timestamp"
+            }
+          ],
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "CyberAPI"
+          },
+          "format": "table",
+          "parser": "backend",
+          "refId": "A",
+          "root_selector": "",
+          "source": "url",
+          "type": "json",
+          "url": "http://serving:8000/api/threats/correlated?minutes=60&limit=100",
+          "url_options": {
+            "method": "GET"
+          }
+        }
+      ],
+      "title": "Correlated Multi-Step Attacks",
+      "type": "table"
     }
   ],
   "refresh": "5s",
   "schemaVersion": 39,
   "tags": [
+    "correlation",
     "cybersecurity",
     "geolocation",
     "ml",
@@ -1281,6 +1403,6 @@
   "timezone": "browser",
   "title": "CyberSecurity Dashboard",
   "uid": "cybersecurity-streaming",
-  "version": 2,
+  "version": 3,
   "weekStart": ""
 }

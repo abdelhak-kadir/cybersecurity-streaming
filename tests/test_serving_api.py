@@ -26,6 +26,7 @@ def make_clients(
     alert_count=0,
     recent_events=None,
     live_threats=None,
+    correlated_attacks=None,
     ip_reputation=None,
     top_ips=None,
     attack_patterns=None,
@@ -38,6 +39,7 @@ def make_clients(
     mock_cass.get_ip_alert_count.return_value = alert_count
     mock_cass.get_ip_recent_events.return_value = recent_events or []
     mock_cass.get_live_threats.return_value = live_threats or []
+    mock_cass.get_correlated_attacks.return_value = correlated_attacks or []
 
     mock_hbase = MagicMock()
     mock_hbase.ping.return_value = hbase_ping
@@ -237,6 +239,15 @@ def test_live_threats_passes_params_to_client(client_factory):
         )
 
 
+def test_live_threats_filtered_empty_does_not_fallback_to_hbase(client_factory):
+    top_ips = [{"ip": "10.0.0.9", "reputation_score": 100.0, "nb_malicious": 9, "nb_suspicious": 0}]
+    with client_factory(live_threats=[], top_ips=top_ips) as c:
+        r = c.get("/api/threats/live?attack_type=port-scan")
+        assert r.status_code == 200
+        assert r.json() == {"threats": [], "count": 0}
+        c.mock_hbase.get_top_ips.assert_not_called()
+
+
 def test_live_threats_invalid_minutes(client_factory):
     with client_factory() as c:
         r = c.get("/api/threats/live?minutes=0")
@@ -247,6 +258,40 @@ def test_live_threats_minutes_too_large(client_factory):
     with client_factory() as c:
         r = c.get("/api/threats/live?minutes=9999")
         assert r.status_code == 422
+
+
+# ── /api/threats/correlated ───────────────────────────────────────────────
+
+def test_correlated_attacks_returns_list(client_factory):
+    now = datetime(2026, 4, 30, 12, 0, 0)
+    attacks = [
+        row(
+            ip_source="10.0.0.9",
+            first_seen=now,
+            last_seen=now,
+            stages={"port-scan", "attack-signature"},
+            threat_score=100,
+        )
+    ]
+    with client_factory(correlated_attacks=attacks) as c:
+        r = c.get("/api/threats/correlated")
+        assert r.status_code == 200
+        body = r.json()
+        assert body[0]["ip_source"] == "10.0.0.9"
+        assert body[0]["stages"] == ["attack-signature", "port-scan"]
+        assert body[0]["threat_score"] == 100
+
+
+def test_correlated_attacks_passes_params_to_client(client_factory):
+    with client_factory(correlated_attacks=[]) as c:
+        c.get("/api/threats/correlated?minutes=30&limit=25")
+        c.mock_cass.get_correlated_attacks.assert_called_once_with(minutes=30, limit=25)
+
+
+def test_correlated_attacks_invalid_params(client_factory):
+    with client_factory() as c:
+        assert c.get("/api/threats/correlated?minutes=0").status_code == 422
+        assert c.get("/api/threats/correlated?limit=0").status_code == 422
 
 
 # ── /api/stats/top-ips ────────────────────────────────────────────────────
