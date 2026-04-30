@@ -36,8 +36,8 @@ def build_random_forest():
     rf = RandomForestClassifier(
         featuresCol="features",
         labelCol="label",
-        numTrees=100,
-        maxDepth=10,
+        numTrees=30,
+        maxDepth=8,
         seed=42,
         featureSubsetStrategy="sqrt"
     )
@@ -50,7 +50,7 @@ def build_logistic_regression():
     lr = LogisticRegression(
         featuresCol="features",
         labelCol="label",
-        maxIter=100,
+        maxIter=40,
         regParam=0.01,
         elasticNetParam=0.0,
         family="multinomial"
