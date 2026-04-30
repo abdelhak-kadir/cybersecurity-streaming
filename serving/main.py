@@ -11,6 +11,7 @@ import requests as _requests
 from db.cassandra_client import CassandraClient
 from db.hbase_client import HBaseClient
 from models.schemas import (
+    AdaptiveScore,
     AttackPattern,
     CorrelatedAttack,
     GeoThreat,
@@ -200,6 +201,80 @@ def get_correlated_attacks(
         )
         for r in rows
     ]
+
+
+def _int_value(data: Optional[dict], key: str) -> int:
+    if not data:
+        return 0
+    try:
+        return int(float(data.get(key, 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+@app.get("/api/scoring/adaptive", response_model=list[AdaptiveScore])
+def get_adaptive_scores(
+    minutes: int = Query(60, ge=1, le=1440),
+    limit: int = Query(50, ge=1, le=200),
+):
+    if not cassandra:
+        raise HTTPException(status_code=503, detail="Cassandra unavailable")
+
+    query_limit = min(max(limit * 100, 1000), 10000)
+    rows = cassandra.get_recent_threats(minutes=minutes, limit=query_limit)
+    grouped: dict[str, list] = {}
+    for row in rows:
+        grouped.setdefault(row.ip_source, []).append(row)
+
+    scores = []
+    for ip, events in grouped.items():
+        base_score = max((event.threat_score or 0) for event in events)
+        attack_types = sorted({event.attack_type for event in events if event.attack_type})
+        alert_count = len(events)
+        last_seen = max(
+            (event.last_seen for event in events if event.last_seen),
+            default=None,
+        )
+
+        boost = 0
+        reasons = []
+        if alert_count >= 5:
+            boost += 10
+            reasons.append("5+ recent alerts")
+        if len(attack_types) >= 3:
+            boost += 10
+            reasons.append("3+ attack types")
+
+        batch = hbase.get_ip_reputation(ip) if hbase else None
+        batch_score = _int_value(batch, "data:reputation_score")
+        batch_malicious = _int_value(batch, "data:nb_malicious")
+        if batch_score >= 80 or batch_malicious > 0:
+            boost += 15
+            reasons.append("known malicious in batch")
+
+        adaptive_score = min(100, base_score + boost)
+        scores.append(
+            AdaptiveScore(
+                ip_source=ip,
+                base_score=base_score,
+                adaptive_score=adaptive_score,
+                score_delta=adaptive_score - base_score,
+                reasons=reasons,
+                attack_types=attack_types,
+                alert_count=alert_count,
+                last_seen=last_seen,
+            )
+        )
+
+    scores.sort(
+        key=lambda item: (
+            item.adaptive_score,
+            item.score_delta,
+            item.last_seen or datetime.min,
+        ),
+        reverse=True,
+    )
+    return scores[:limit]
 
 
 @app.get("/api/stats/top-ips", response_model=list[TopIP])

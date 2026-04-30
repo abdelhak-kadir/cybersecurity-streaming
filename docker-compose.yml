@@ -309,7 +309,11 @@ services:
       - "3000:3000"
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=admin
-      - GF_INSTALL_PLUGINS=yesoreyeram-infinity-datasource
+    command: >
+      sh -lc "if [ ! -f /var/lib/grafana/plugins/yesoreyeram-infinity-datasource/plugin.json ];
+      then grafana cli --pluginsDir /var/lib/grafana/plugins plugins install yesoreyeram-infinity-datasource;
+      fi;
+      exec /run.sh"
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning
       - ./grafana/dashboards:/var/lib/grafana/dashboards

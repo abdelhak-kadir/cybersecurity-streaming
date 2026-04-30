@@ -46,6 +46,17 @@ class CorrelatedAttack(BaseModel):
     threat_score: int
 
 
+class AdaptiveScore(BaseModel):
+    ip_source: str
+    base_score: int
+    adaptive_score: int
+    score_delta: int
+    reasons: list[str]
+    attack_types: list[str]
+    alert_count: int
+    last_seen: Optional[datetime]
+
+
 class TopIP(BaseModel):
     ip: str
     reputation_score: float

@@ -26,6 +26,7 @@ def make_clients(
     alert_count=0,
     recent_events=None,
     live_threats=None,
+    recent_threats=None,
     correlated_attacks=None,
     ip_reputation=None,
     top_ips=None,
@@ -39,6 +40,7 @@ def make_clients(
     mock_cass.get_ip_alert_count.return_value = alert_count
     mock_cass.get_ip_recent_events.return_value = recent_events or []
     mock_cass.get_live_threats.return_value = live_threats or []
+    mock_cass.get_recent_threats.return_value = recent_threats or []
     mock_cass.get_correlated_attacks.return_value = correlated_attacks or []
 
     mock_hbase = MagicMock()
@@ -292,6 +294,76 @@ def test_correlated_attacks_invalid_params(client_factory):
     with client_factory() as c:
         assert c.get("/api/threats/correlated?minutes=0").status_code == 422
         assert c.get("/api/threats/correlated?limit=0").status_code == 422
+
+
+# ── /api/scoring/adaptive ─────────────────────────────────────────────────
+
+def test_adaptive_score_isolated_event_keeps_base_score(client_factory):
+    now = datetime(2026, 4, 30, 12, 0, 0)
+    events = [row(ip_source="10.0.0.1", last_seen=now, threat_score=75, attack_type="port-scan")]
+    with client_factory(recent_threats=events, ip_reputation=None) as c:
+        r = c.get("/api/scoring/adaptive")
+        assert r.status_code == 200
+        body = r.json()[0]
+        assert body["base_score"] == 75
+        assert body["adaptive_score"] == 75
+        assert body["score_delta"] == 0
+        assert body["reasons"] == []
+
+
+def test_adaptive_score_boosts_repeated_alerts(client_factory):
+    now = datetime(2026, 4, 30, 12, 0, 0)
+    events = [
+        row(ip_source="10.0.0.2", last_seen=now, threat_score=70, attack_type="data-exfiltration")
+        for _ in range(5)
+    ]
+    with client_factory(recent_threats=events, ip_reputation=None) as c:
+        body = c.get("/api/scoring/adaptive").json()[0]
+        assert body["adaptive_score"] == 80
+        assert "5+ recent alerts" in body["reasons"]
+
+
+def test_adaptive_score_boosts_multiple_attack_types(client_factory):
+    now = datetime(2026, 4, 30, 12, 0, 0)
+    events = [
+        row(ip_source="10.0.0.3", last_seen=now, threat_score=75, attack_type="port-scan"),
+        row(ip_source="10.0.0.3", last_seen=now, threat_score=80, attack_type="brute-force"),
+        row(ip_source="10.0.0.3", last_seen=now, threat_score=95, attack_type="attack-signature"),
+    ]
+    with client_factory(recent_threats=events, ip_reputation=None) as c:
+        body = c.get("/api/scoring/adaptive").json()[0]
+        assert body["adaptive_score"] == 100
+        assert "3+ attack types" in body["reasons"]
+
+
+def test_adaptive_score_boosts_hbase_malicious_reputation(client_factory):
+    now = datetime(2026, 4, 30, 12, 0, 0)
+    events = [row(ip_source="10.0.0.4", last_seen=now, threat_score=70, attack_type="data-exfiltration")]
+    batch = {"data:reputation_score": "85", "data:nb_malicious": "0"}
+    with client_factory(recent_threats=events, ip_reputation=batch) as c:
+        body = c.get("/api/scoring/adaptive").json()[0]
+        assert body["adaptive_score"] == 85
+        assert "known malicious in batch" in body["reasons"]
+
+
+def test_adaptive_score_caps_at_100(client_factory):
+    now = datetime(2026, 4, 30, 12, 0, 0)
+    events = [
+        row(ip_source="10.0.0.5", last_seen=now, threat_score=95, attack_type=attack_type)
+        for attack_type in ["port-scan", "brute-force", "attack-signature", "data-exfiltration", "multi-step-attack"]
+    ]
+    batch = {"data:reputation_score": "100", "data:nb_malicious": "4"}
+    with client_factory(recent_threats=events, ip_reputation=batch) as c:
+        body = c.get("/api/scoring/adaptive").json()[0]
+        assert body["base_score"] == 95
+        assert body["adaptive_score"] == 100
+        assert body["score_delta"] == 5
+
+
+def test_adaptive_score_validates_params(client_factory):
+    with client_factory() as c:
+        assert c.get("/api/scoring/adaptive?minutes=0").status_code == 422
+        assert c.get("/api/scoring/adaptive?limit=0").status_code == 422
 
 
 # ── /api/stats/top-ips ────────────────────────────────────────────────────

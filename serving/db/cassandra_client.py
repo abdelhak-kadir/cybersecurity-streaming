@@ -70,6 +70,16 @@ class CassandraClient:
         rows.sort(key=lambda r: r.last_seen or datetime.min, reverse=True)
         return rows[:limit]
 
+    def get_recent_threats(self, minutes: int = 60, limit: int = 5000) -> list:
+        since = datetime.utcnow() - timedelta(minutes=minutes)
+        query = (
+            "SELECT ip_source, last_seen, threat_score, attack_type "
+            "FROM realtime_threats WHERE last_seen >= %s ALLOW FILTERING"
+        )
+        rows = list(self.session.execute(query, [since]))
+        rows.sort(key=lambda r: r.last_seen or datetime.min, reverse=True)
+        return rows[:limit]
+
     def get_correlated_attacks(self, minutes: int = 60, limit: int = 100) -> list:
         since = datetime.utcnow() - timedelta(minutes=minutes)
         query = (

@@ -1381,11 +1381,167 @@
       ],
       "title": "Correlated Multi-Step Attacks",
       "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "CyberAPI"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 70
+              },
+              {
+                "color": "red",
+                "value": 90
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "adaptive_score"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "mode": "basic",
+                  "type": "color-background"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "base_score"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "mode": "basic",
+                  "type": "color-background"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 50
+      },
+      "id": 13,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "adaptive_score"
+          }
+        ]
+      },
+      "pluginVersion": "10.4.2",
+      "targets": [
+        {
+          "columns": [
+            {
+              "selector": "ip_source",
+              "text": "ip_source",
+              "type": "string"
+            },
+            {
+              "selector": "base_score",
+              "text": "base_score",
+              "type": "number"
+            },
+            {
+              "selector": "adaptive_score",
+              "text": "adaptive_score",
+              "type": "number"
+            },
+            {
+              "selector": "score_delta",
+              "text": "score_delta",
+              "type": "number"
+            },
+            {
+              "selector": "reasons",
+              "text": "reasons",
+              "type": "string"
+            },
+            {
+              "selector": "attack_types",
+              "text": "attack_types",
+              "type": "string"
+            },
+            {
+              "selector": "alert_count",
+              "text": "alert_count",
+              "type": "number"
+            },
+            {
+              "selector": "last_seen",
+              "text": "last_seen",
+              "type": "timestamp"
+            }
+          ],
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "CyberAPI"
+          },
+          "format": "table",
+          "parser": "backend",
+          "refId": "A",
+          "root_selector": "",
+          "source": "url",
+          "type": "json",
+          "url": "http://serving:8000/api/scoring/adaptive?minutes=60&limit=50",
+          "url_options": {
+            "method": "GET"
+          }
+        }
+      ],
+      "title": "Adaptive IP Risk Scores",
+      "type": "table"
     }
   ],
   "refresh": "5s",
   "schemaVersion": 39,
   "tags": [
+    "adaptive-scoring",
     "correlation",
     "cybersecurity",
     "geolocation",
@@ -1403,6 +1559,6 @@
   "timezone": "browser",
   "title": "CyberSecurity Dashboard",
   "uid": "cybersecurity-streaming",
-  "version": 3,
+  "version": 4,
   "weekStart": ""
 }
