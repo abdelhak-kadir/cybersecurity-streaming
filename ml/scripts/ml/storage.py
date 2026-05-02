@@ -5,7 +5,6 @@ Persistence : sauvegarde du modèle dans HDFS
 et des métriques / prédictions dans HBase.
 """
 
-import happybase
 from pyspark.sql import DataFrame
 from pyspark.sql.functions import col
 
@@ -39,6 +38,7 @@ def save_to_hbase(metrics_rf: dict, metrics_lr: dict,
       - importance des features
       - échantillon de prédictions incorrectes
     """
+    import happybase  # lazy — avoids import-time dependency for non-HBase environments
     try:
         connection = happybase.Connection(host=hbase_host, port=9090)
         tables = [t.decode() for t in connection.tables()]
@@ -116,6 +116,7 @@ def save_prediction_run_to_hbase(
       - RUN_<timestamp>   : run metadata + prediction counts per label
       - RUN_<timestamp>_METRICS : accuracy/f1/precision if ground truth was available
     """
+    import happybase  # lazy — avoids import-time dependency for non-HBase environments
     try:
         connection = happybase.Connection(host=hbase_host, port=9090)
         tables = [t.decode() for t in connection.tables()]

@@ -72,7 +72,7 @@ raw_stream = spark.readStream \
     .format("kafka") \
     .option("kafka.bootstrap.servers", KAFKA_BROKER) \
     .option("subscribe", KAFKA_TOPIC) \
-    .option("startingOffsets", "earliest") \
+    .option("startingOffsets", "latest") \
     .option("failOnDataLoss", "false") \
     .load()
 
@@ -104,24 +104,42 @@ def write_to_cassandra(stream, query_name: str):
         .option("checkpointLocation", f"{CHECKPOINT_BASE}/{query_name}") \
         .start()
 
+# ── Executor-local Cassandra session singleton ────────────────────────────
+# A new Cluster object is created only once per Spark executor process,
+# avoiding the connection-per-batch overhead of the previous implementation.
+_cassandra_cluster = None
+_cassandra_session = None
+
+
+def _get_session():
+    global _cassandra_cluster, _cassandra_session
+    if _cassandra_session is None:
+        from cassandra.cluster import Cluster
+        _cassandra_cluster = Cluster([CASSANDRA_HOST])
+        _cassandra_session = _cassandra_cluster.connect(CASSANDRA_KEYSPACE)
+    return _cassandra_session
+
+
 # ── Combined foreachBatch: write to both tables ───────────────────────────
 def make_batch_writer(query_name: str):
     """
     Returns a foreachBatch function that:
       1. Appends all rows to realtime_threats (TTL 24h enforced by schema)
       2. Atomically updates ip_threat_summary using SET addition (no read needed)
-      3. Detects multi-step attacks for IPs touched by this micro-batch
+      3. Detects multi-step attacks for IPs touched by this micro-batch using
+         concurrent Cassandra queries (one per unique IP, issued in parallel)
     """
     def save_batch(batch_df, batch_id):
-        from cassandra.cluster import Cluster
         from datetime import datetime, timedelta
+        from cassandra.concurrent import execute_concurrent_with_args
+
         n = batch_df.count()
         if n == 0:
             return
         if n > MAX_THREATS_PER_BATCH:
             print(f"[{query_name}] batch {batch_id} — capping {n} threat(s) to {MAX_THREATS_PER_BATCH}")
             batch_df = batch_df.orderBy(col("last_seen").desc()).limit(MAX_THREATS_PER_BATCH)
-            n = batch_df.count()
+            n = MAX_THREATS_PER_BATCH  # avoid a second full scan just for the log line
 
         print(f"[{query_name}] batch {batch_id} — {n} threat(s)")
 
@@ -132,9 +150,7 @@ def make_batch_writer(query_name: str):
             .mode("append") \
             .save()
 
-        # One Cassandra connection per batch
-        cluster = Cluster([CASSANDRA_HOST])
-        session = cluster.connect(CASSANDRA_KEYSPACE)
+        session = _get_session()
 
         # Atomic SET addition — no read needed, idempotent on retry.
         # threat_score is intentionally omitted: the serving layer derives the
@@ -146,10 +162,12 @@ def make_batch_writer(query_name: str):
                     attack_types = attack_types + ?
                 WHERE ip_source  = ?"""
         )
+        # Time filter pushed into CQL — avoids fetching data outside the
+        # correlation window and eliminates the Python-side post-filter.
         select_recent = session.prepare(
             f"""SELECT last_seen, attack_type
                 FROM {CASSANDRA_TABLE}
-                WHERE ip_source = ?
+                WHERE ip_source = ? AND last_seen >= ?
                 LIMIT 100"""
         )
         insert_correlated = session.prepare(
@@ -172,14 +190,26 @@ def make_batch_writer(query_name: str):
             except Exception as e:
                 print(f"  [summary] ERROR for {row['ip_source']}: {e}")
 
-        for ip in {row["ip_source"] for row in rows}:
+        # Fetch recent history for all unique IPs concurrently rather than
+        # serially — avoids N round-trips blocking the micro-batch.
+        cutoff = datetime.utcnow() - timedelta(seconds=CORRELATION_WINDOW_SECONDS)
+        unique_ips = list({row["ip_source"] for row in rows})
+        concurrent_results = execute_concurrent_with_args(
+            session,
+            select_recent,
+            [(ip, cutoff) for ip in unique_ips],
+            concurrency=20,
+            raise_on_first_error=False,
+        )
+        ip_recent: dict = {}
+        for i, (success, result) in enumerate(concurrent_results):
+            if success:
+                ip_recent[unique_ips[i]] = list(result)
+            else:
+                print(f"  [correlation] SELECT failed for {unique_ips[i]}: {result}")
+
+        for ip, recent_rows in ip_recent.items():
             try:
-                recent_rows = list(session.execute(select_recent, [ip]))
-                cutoff = datetime.utcnow() - timedelta(seconds=CORRELATION_WINDOW_SECONDS)
-                recent_rows = [
-                    r for r in recent_rows
-                    if r.last_seen and r.last_seen.replace(tzinfo=None) >= cutoff
-                ]
                 stages = {r.attack_type for r in recent_rows if r.attack_type}
                 if RECON_STAGE not in stages or not (stages & EXPLOIT_STAGES):
                     continue
@@ -199,8 +229,6 @@ def make_batch_writer(query_name: str):
                 print(f"  [correlation] {ip}: {sorted(correlated_stages)}")
             except Exception as e:
                 print(f"  [correlation] ERROR for {ip}: {e}")
-
-        cluster.shutdown()
 
     return save_batch
 
@@ -286,15 +314,15 @@ print("Detection 3 started: volume anomaly")
 
 
 # ── DETECTION 4: Port scan / reconnaissance ──────────────────────────────
-# Dataset has no destination port column, so live reconnaissance is inferred
-# from scanner user-agents (Nmap/Masscan) and repeated blocked network probes.
+# Trigger only on well-known scanner tool fingerprints in the user-agent.
+# The previous broad catch of ALL blocked TCP/UDP/ICMP traffic was flagging
+# normal firewall denies as port scans, producing false positives for every IP
+# with as few as 3 blocked packets in a minute.
 scan_filter = (
     lower(col("user_agent")).contains("nmap")
     | lower(col("user_agent")).contains("masscan")
-    | (
-        (col("action") == "blocked")
-        & col("protocol").isin("TCP", "UDP", "ICMP")
-    )
+    | lower(col("user_agent")).contains("zmap")
+    | lower(col("user_agent")).contains("zgrab")
 )
 
 port_scan = logs \
@@ -304,7 +332,7 @@ port_scan = logs \
         col("source_ip")
     ) \
     .agg(count("*").alias("probe_count")) \
-    .filter(col("probe_count") >= 3) \
+    .filter(col("probe_count") >= 1) \
     .select(
         col("source_ip").alias("ip_source"),
         current_timestamp().alias("last_seen"),

@@ -254,6 +254,7 @@ services:
     volumes:
       - ./streaming:/app
       - ./data:/data
+      - spark-checkpoints:/tmp/spark-checkpoints-v3
     working_dir: /app
     command: >
       spark-submit
@@ -329,6 +330,7 @@ volumes:
   cassandra-data: {}
   hdfs-namenode: {}
   hdfs-datanode: {}
+  spark-checkpoints: {}
   grafana-data: {}
 
 networks:

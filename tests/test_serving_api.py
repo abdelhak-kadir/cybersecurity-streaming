@@ -29,6 +29,7 @@ def make_clients(
     recent_threats=None,
     correlated_attacks=None,
     ip_reputation=None,
+    batch_reputations=None,   # used by /api/scoring/adaptive (batch multi-get)
     top_ips=None,
     attack_patterns=None,
     threat_timeline=None,
@@ -46,6 +47,7 @@ def make_clients(
     mock_hbase = MagicMock()
     mock_hbase.ping.return_value = hbase_ping
     mock_hbase.get_ip_reputation.return_value = ip_reputation
+    mock_hbase.get_ip_reputations_batch.return_value = batch_reputations or {}
     mock_hbase.get_top_ips.return_value = top_ips or []
     mock_hbase.get_attack_patterns.return_value = attack_patterns or []
     mock_hbase.get_threat_timeline.return_value = threat_timeline or []
@@ -339,8 +341,9 @@ def test_adaptive_score_boosts_multiple_attack_types(client_factory):
 def test_adaptive_score_boosts_hbase_malicious_reputation(client_factory):
     now = datetime(2026, 4, 30, 12, 0, 0)
     events = [row(ip_source="10.0.0.4", last_seen=now, threat_score=70, attack_type="data-exfiltration")]
+    # get_adaptive_scores uses get_ip_reputations_batch (one call, returns {ip: row})
     batch = {"data:reputation_score": "85", "data:nb_malicious": "0"}
-    with client_factory(recent_threats=events, ip_reputation=batch) as c:
+    with client_factory(recent_threats=events, batch_reputations={"10.0.0.4": batch}) as c:
         body = c.get("/api/scoring/adaptive").json()[0]
         assert body["adaptive_score"] == 85
         assert "known malicious in batch" in body["reasons"]
@@ -353,7 +356,7 @@ def test_adaptive_score_caps_at_100(client_factory):
         for attack_type in ["port-scan", "brute-force", "attack-signature", "data-exfiltration", "multi-step-attack"]
     ]
     batch = {"data:reputation_score": "100", "data:nb_malicious": "4"}
-    with client_factory(recent_threats=events, ip_reputation=batch) as c:
+    with client_factory(recent_threats=events, batch_reputations={"10.0.0.5": batch}) as c:
         body = c.get("/api/scoring/adaptive").json()[0]
         assert body["base_score"] == 95
         assert body["adaptive_score"] == 100
@@ -474,3 +477,76 @@ def test_ml_endpoints_return_summary_sections(client_factory, tmp_path):
             assert c.get("/api/ml/prediction-counts").json()[0]["predicted_label"] == "malicious"
             features = c.get("/api/ml/feature-importance?limit=1").json()
             assert features == [{"feature": "path_length", "importance": 0.7546}]
+
+
+# ── /api/threats/live — no fake fallback ─────────────────────────────────
+
+def test_live_threats_empty_cassandra_returns_empty_list_not_hbase_data(client_factory):
+    """When Cassandra has no live threats, the endpoint must return [] not fabricated
+    HBase data.  The previous implementation silently injected batch-layer IPs as
+    fake live threats, making the dashboard misleading."""
+    hbase_ips = [{"ip": "1.2.3.4", "reputation_score": 90.0, "nb_malicious": 5, "nb_suspicious": 0}]
+    with client_factory(live_threats=[], top_ips=hbase_ips) as c:
+        r = c.get("/api/threats/live")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["count"] == 0
+        assert body["threats"] == []
+
+
+# ── /api/stats/geo-threats ────────────────────────────────────────────────
+
+def test_geo_threats_excludes_ips_without_location(client_factory):
+    """IPs for which geo lookup returns no lat/lon must be absent from the response."""
+    ips = [
+        {"ip": "8.8.8.8", "reputation_score": 80.0, "nb_malicious": 3, "nb_suspicious": 0},
+        {"ip": "192.168.1.1", "reputation_score": 90.0, "nb_malicious": 5, "nb_suspicious": 0},
+    ]
+    geo_result = {
+        "8.8.8.8": {"lat": 37.4, "lon": -122.1, "country": "US", "city": "Mountain View"},
+        "192.168.1.1": {},  # private IP — no geo data returned
+    }
+    with client_factory(top_ips=ips) as c:
+        with patch("main.geolocate_batch", return_value=geo_result):
+            r = c.get("/api/stats/geo-threats")
+            assert r.status_code == 200
+            body = r.json()
+            assert len(body) == 1
+            assert body[0]["ip"] == "8.8.8.8"
+            assert body[0]["country"] == "US"
+            assert body[0]["lat"] == pytest.approx(37.4)
+
+
+def test_geo_threats_503_when_hbase_unavailable():
+    import main as app_module
+    with patch("main.HBaseClient", side_effect=Exception("down")), \
+         patch("main.CassandraClient") as mock_cass_cls:
+        mock_cass_cls.return_value = MagicMock()
+        with TestClient(app_module.app) as c:
+            r = c.get("/api/stats/geo-threats")
+            assert r.status_code == 503
+
+
+def test_geo_private_ip_skipped_in_lookup(client_factory):
+    """_is_private() must prevent RFC1918 addresses from being sent to ip-api.com."""
+    import main as app_module
+    ips = [
+        {"ip": "192.168.1.5", "reputation_score": 80.0, "nb_malicious": 2, "nb_suspicious": 0},
+        {"ip": "8.8.4.4", "reputation_score": 70.0, "nb_malicious": 1, "nb_suspicious": 0},
+    ]
+    with client_factory(top_ips=ips) as c:
+        with patch("main._requests") as mock_req:
+            mock_req.post.return_value.json.return_value = [
+                {"query": "8.8.4.4", "lat": 37.0, "lon": -122.0, "country": "US", "city": "X", "status": "success"}
+            ]
+            mock_req.post.return_value.raise_for_status.return_value = None
+            # Flush cache so the lookup actually fires
+            app_module._geo_cache.clear()
+            app_module._geo_cache_time = 0.0
+            r = c.get("/api/stats/geo-threats")
+            assert r.status_code == 200
+            # ip-api.com must NOT have been called with the private IP
+            call_payload = mock_req.post.call_args[1]["json"]
+            queried_ips = [entry["query"] for entry in call_payload]
+            assert "192.168.1.5" not in queried_ips
+            assert "8.8.4.4" in queried_ips

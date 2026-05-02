@@ -12,8 +12,6 @@ USE cybersecurity;
 DROP TABLE IF EXISTS realtime_threats;
 DROP TABLE IF EXISTS ip_threat_summary;
 DROP TABLE IF EXISTS correlated_attacks;
-DROP TABLE IF EXISTS ip_alert_counters;
-
 -- Recreate with current schema
 CREATE TABLE IF NOT EXISTS realtime_threats (
     ip_source    TEXT,

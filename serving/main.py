@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 from datetime import datetime
+import ipaddress
 import json
 import os
 import time as _time
@@ -48,11 +49,34 @@ def load_ml_summary() -> MLSummary:
         return MLSummary(status="unavailable")
 
 
+def _is_private(ip: str) -> bool:
+    """Return True for RFC1918 / loopback / link-local addresses.
+    ip-api.com returns status=fail for private IPs, so we skip them."""
+    try:
+        return ipaddress.ip_address(ip).is_private
+    except ValueError:
+        return True
+
+
 def geolocate_batch(ips: list) -> dict:
+    """Look up lat/lon for a list of public IPs via ip-api.com.
+
+    Cache is invalidated once per _GEO_TTL (1 h) so stale entries are
+    refreshed.  New IPs that were not in the previous batch are fetched
+    immediately regardless of TTL — the TTL only controls full-cache
+    invalidation, not per-IP freshness.
+    """
     global _geo_cache_time
     now = _time.time()
-    uncached = [ip for ip in ips if ip not in _geo_cache]
-    if uncached and (now - _geo_cache_time > _GEO_TTL):
+    # Invalidate the entire cache once per TTL period so entries don't
+    # grow stale indefinitely.
+    if now - _geo_cache_time > _GEO_TTL:
+        _geo_cache.clear()
+        _geo_cache_time = now
+    # Only request public IPs that are not already cached.
+    # ip-api.com returns status=fail for RFC1918/loopback ranges.
+    uncached = [ip for ip in ips if ip not in _geo_cache and not _is_private(ip)]
+    if uncached:
         try:
             response = _requests.post(
                 "http://ip-api.com/batch",
@@ -66,7 +90,6 @@ def geolocate_batch(ips: list) -> dict:
             for entry in response.json():
                 if entry.get("status") == "success":
                     _geo_cache[entry["query"]] = entry
-            _geo_cache_time = now
         except Exception as exc:
             print(f"[geo] lookup failed: {exc}")
     return {ip: _geo_cache.get(ip, {}) for ip in ips}
@@ -168,18 +191,6 @@ def get_live_threats(
         )
         for r in rows
     ]
-    if not threats and hbase and attack_type is None:
-        now = datetime.utcnow()
-        threats = [
-            LiveThreat(
-                ip_source=row["ip"],
-                last_seen=now,
-                threat_score=int(row["reputation_score"]),
-                attack_type="historical-malicious",
-            )
-            for row in hbase.get_top_ips(limit=min(limit, 100))
-            if int(row["reputation_score"]) >= min_score
-        ]
     return LiveThreatsResponse(threats=threats, count=len(threats))
 
 
@@ -226,6 +237,9 @@ def get_adaptive_scores(
     for row in rows:
         grouped.setdefault(row.ip_source, []).append(row)
 
+    # Single batch HBase lookup instead of N separate connections per IP
+    batch_data: dict = hbase.get_ip_reputations_batch(list(grouped.keys())) if hbase else {}
+
     scores = []
     for ip, events in grouped.items():
         base_score = max((event.threat_score or 0) for event in events)
@@ -238,6 +252,14 @@ def get_adaptive_scores(
 
         boost = 0
         reasons = []
+        # Explain the base score itself when it comes from a high-severity detection
+        HIGH_SCORE_TYPES = {"multi-step-attack", "attack-signature"}
+        if base_score >= 95 and any(t in HIGH_SCORE_TYPES for t in attack_types):
+            matched = sorted(set(attack_types) & HIGH_SCORE_TYPES)
+            reasons.append(f"high-severity detection: {', '.join(matched)}")
+        elif base_score >= 70:
+            reasons.append(f"realtime score {base_score}")
+
         if alert_count >= 5:
             boost += 10
             reasons.append("5+ recent alerts")
@@ -245,7 +267,7 @@ def get_adaptive_scores(
             boost += 10
             reasons.append("3+ attack types")
 
-        batch = hbase.get_ip_reputation(ip) if hbase else None
+        batch = batch_data.get(ip)
         batch_score = _int_value(batch, "data:reputation_score")
         batch_malicious = _int_value(batch, "data:nb_malicious")
         if batch_score >= 80 or batch_malicious > 0:
