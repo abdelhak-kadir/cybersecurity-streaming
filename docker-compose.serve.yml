@@ -1,0 +1,90 @@
+version: '3.8'
+
+# ══════════════════════════════════════════════════════════════════
+#  Droplet 3 — "serve"
+#  Services: FastAPI (internal), Grafana (internal), Caddy (public HTTPS)
+#
+#  Ansible replaces placeholders before `docker compose up`:
+#    INFRA_PRIVATE_IP        → VPC IP of Droplet 1 (Cassandra :9042)
+#    COMPUTE_PRIVATE_IP      → VPC IP of Droplet 2 (HBase Thrift :9090)
+#    GRAFANA_SUBDOMAIN_PLACEHOLDER → e.g. grafana.example.com
+#    GF_PASSWORD_PLACEHOLDER → Grafana admin password from .env
+#
+#  Public traffic flow:
+#    Browser → Caddy :443 (HTTPS + Let's Encrypt)
+#               ├─ grafana.example.com → grafana:3000  (always)
+#               └─ api.example.com    → serving:8000   (EXPOSE_API=true only)
+# ══════════════════════════════════════════════════════════════════
+
+services:
+
+  serving:
+    build: ./serving
+    container_name: serving
+    # No public port — only reachable inside the Docker network (by Caddy)
+    environment:
+      - CASSANDRA_HOST=INFRA_PRIVATE_IP
+      - CASSANDRA_PORT=9042
+      - HBASE_HOST=COMPUTE_PRIVATE_IP
+      - HBASE_PORT=9090
+      - ML_SUMMARY_PATH=/data/ml_summary.json
+    volumes:
+      - ./data:/data:ro
+    networks:
+      - cyber-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: grafana
+    # No public port — Caddy terminates TLS and proxies here
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=GF_PASSWORD_PLACEHOLDER
+      - GF_SERVER_ROOT_URL=https://GRAFANA_SUBDOMAIN_PLACEHOLDER
+      - GF_SERVER_DOMAIN=GRAFANA_SUBDOMAIN_PLACEHOLDER
+      - GF_SECURITY_ALLOW_EMBEDDING=true
+      # GF_INSTALL_PLUGINS is the official way — Grafana installs on every start
+      # if not already present in the grafana-data volume.
+      - GF_INSTALL_PLUGINS=yesoreyeram-infinity-datasource
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      serving:
+        condition: service_healthy
+    networks:
+      - cyber-net
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: caddy
+    ports:
+      - "80:80"    # HTTP (Let's Encrypt ACME challenge + redirect to HTTPS)
+      - "443:443"  # HTTPS
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data       # persists TLS certificates across restarts
+      - caddy-config:/config
+    depends_on:
+      grafana:
+        condition: service_started
+      serving:
+        condition: service_healthy
+    networks:
+      - cyber-net
+    restart: unless-stopped
+
+volumes:
+  grafana-data: {}
+  caddy-data: {}
+  caddy-config: {}
+
+networks:
+  cyber-net:
+    driver: bridge
