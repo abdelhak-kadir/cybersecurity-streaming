@@ -1,0 +1,44 @@
+---
+# Copies ml_summary.json from the compute droplet to the serve droplet.
+# Run this after `make remote-batch-all` (or after ml-train) so the
+# /api/ml/* endpoints on Droplet 3 reflect the latest model metrics.
+
+- name: Fetch ml_summary.json from compute
+  hosts: compute
+  tasks:
+    - name: Check ml_summary.json exists on compute
+      stat:
+        path: /opt/cyber/data/ml_summary.json
+      register: ml_stat
+
+    - name: Fail if ml_summary.json not found (run ml-train on compute first)
+      fail:
+        msg: >
+          /opt/cyber/data/ml_summary.json not found on compute.
+          Run the ML training job first: ssh root@<compute-ip>
+          "docker exec spark-batch spark-submit --master spark://spark-master:7077 /ml/08_ml_threat_classification.py"
+      when: not ml_stat.stat.exists
+
+    - name: Fetch ml_summary.json to local machine
+      fetch:
+        src: /opt/cyber/data/ml_summary.json
+        dest: /tmp/ml_summary.json
+        flat: yes
+      when: ml_stat.stat.exists
+
+- name: Push ml_summary.json to serve
+  hosts: serve
+  tasks:
+    - name: Ensure data directory exists
+      file:
+        path: /opt/cyber/data
+        state: directory
+
+    - name: Upload ml_summary.json
+      copy:
+        src: /tmp/ml_summary.json
+        dest: /opt/cyber/data/ml_summary.json
+
+    - name: Confirm file updated
+      debug:
+        msg: "ml_summary.json synced from compute to serve"

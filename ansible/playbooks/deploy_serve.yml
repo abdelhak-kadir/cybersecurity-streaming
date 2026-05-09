@@ -1,0 +1,134 @@
+---
+- name: Deploy serve layer — FastAPI + Grafana + Caddy (Droplet 3)
+  hosts: serve
+  become: true
+  vars:
+    compose_file: docker-compose.serve.yml
+    project: /opt/cyber
+    grafana_subdomain: "{{ lookup('env', 'GRAFANA_SUBDOMAIN') or 'grafana.' + lookup('env', 'DOMAIN') }}"
+    api_subdomain:     "{{ lookup('env', 'API_SUBDOMAIN')     or 'api.'     + lookup('env', 'DOMAIN') }}"
+    acme_email:        "{{ lookup('env', 'ACME_EMAIL') }}"
+    expose_api:        "{{ lookup('env', 'EXPOSE_API') | default('false') }}"
+    gf_password:       "{{ lookup('env', 'GF_SECURITY_ADMIN_PASSWORD') | default('admin') }}"
+
+  tasks:
+
+    # ── Sync files ────────────────────────────────────────────────────────────
+
+    - name: Sync serve compose file
+      synchronize:
+        src: "{{ playbook_dir }}/../../docker-compose.serve.yml"
+        dest: "{{ project }}/"
+
+    - name: Sync FastAPI serving directory
+      synchronize:
+        src: "{{ playbook_dir }}/../../serving/"
+        dest: "{{ project }}/serving/"
+        rsync_opts:
+          - "--exclude=__pycache__"
+          - "--exclude=*.pyc"
+
+    - name: Sync Grafana provisioning and dashboards
+      synchronize:
+        src: "{{ playbook_dir }}/../../grafana/"
+        dest: "{{ project }}/grafana/"
+
+    - name: Sync ml_summary.json (read by /api/ml/* endpoints)
+      synchronize:
+        src: "{{ playbook_dir }}/../../data/ml_summary.json"
+        dest: "{{ project }}/data/ml_summary.json"
+
+    - name: Ensure caddy config directory exists
+      file:
+        path: "{{ project }}/caddy"
+        state: directory
+        mode: "0755"
+
+    - name: Render Caddyfile from template
+      template:
+        src: "{{ playbook_dir }}/../../caddy/Caddyfile.j2"
+        dest: "{{ project }}/caddy/Caddyfile"
+        mode: "0644"
+
+    # ── Inject placeholders into compose file ─────────────────────────────────
+
+    - name: Inject infra VPC IP (Cassandra host)
+      replace:
+        path: "{{ project }}/{{ compose_file }}"
+        regexp: "INFRA_PRIVATE_IP"
+        replace: "{{ infra_private_ip }}"
+
+    - name: Inject compute VPC IP (HBase host)
+      replace:
+        path: "{{ project }}/{{ compose_file }}"
+        regexp: "COMPUTE_PRIVATE_IP"
+        replace: "{{ compute_private_ip }}"
+
+    - name: Inject Grafana subdomain
+      replace:
+        path: "{{ project }}/{{ compose_file }}"
+        regexp: "GRAFANA_SUBDOMAIN_PLACEHOLDER"
+        replace: "{{ grafana_subdomain }}"
+
+    - name: Inject Grafana admin password
+      replace:
+        path: "{{ project }}/{{ compose_file }}"
+        regexp: "GF_PASSWORD_PLACEHOLDER"
+        replace: "{{ gf_password }}"
+
+    # ── Start services ────────────────────────────────────────────────────────
+
+    - name: Build and start FastAPI serving container
+      community.docker.docker_compose_v2:
+        project_src: "{{ project }}"
+        files: ["{{ compose_file }}"]
+        services: [serving]
+        state: present
+        build: always
+
+    - name: Wait for FastAPI to be healthy (checked via Docker healthcheck)
+      shell: |
+        docker inspect --format='{{ '{{' }}.State.Health.Status{{ '}}' }}' serving
+      register: serving_health
+      until: serving_health.stdout == "healthy"
+      retries: 24
+      delay: 5
+
+    - name: Start Grafana
+      community.docker.docker_compose_v2:
+        project_src: "{{ project }}"
+        files: ["{{ compose_file }}"]
+        services: [grafana]
+        state: present
+
+    - name: Wait for Grafana container to be running
+      shell: |
+        docker inspect --format='{{ '{{' }}.State.Status{{ '}}' }}' grafana
+      register: grafana_status
+      until: grafana_status.stdout == "running"
+      retries: 12
+      delay: 5
+
+    - name: Start Caddy (HTTPS reverse proxy + Let's Encrypt)
+      community.docker.docker_compose_v2:
+        project_src: "{{ project }}"
+        files: ["{{ compose_file }}"]
+        services: [caddy]
+        state: present
+
+    - name: Wait for HTTPS to be reachable
+      wait_for:
+        port: 443
+        host: localhost
+        timeout: 60
+
+    # ── Print access URLs ─────────────────────────────────────────────────────
+
+    - name: Print access URLs
+      debug:
+        msg:
+          - "Grafana:  https://{{ grafana_subdomain }}  (admin / {{ gf_password }})"
+          - "FastAPI:  {% if expose_api | bool %}https://{{ api_subdomain }}{% else %}internal only (set EXPOSE_API=true to expose){% endif %}"
+          - ""
+          - "Caddy handles TLS — certificate issued automatically by Let's Encrypt."
+          - "First request may take ~30 s while the cert is provisioned."

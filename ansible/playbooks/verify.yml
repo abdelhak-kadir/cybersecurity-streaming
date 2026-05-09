@@ -1,0 +1,135 @@
+---
+- name: Verify full cluster health
+  hosts: serve
+  tasks:
+    # FastAPI is behind Caddy — port 8000 not bound to host
+    # Use docker inspect (healthcheck already runs /health) + python3 for spot-checks
+    - name: Check FastAPI container health status
+      shell: docker inspect --format='{{ "{{" }}.State.Health.Status{{ "}}" }}' serving
+      register: serving_health
+
+    - name: Assert FastAPI is healthy
+      assert:
+        that:
+          - serving_health.stdout == "healthy"
+        fail_msg: "FastAPI container is {{ serving_health.stdout }} — check: docker logs serving"
+
+    - name: Fetch /health JSON via python3 inside container
+      shell: >
+        docker exec serving
+        python3 -c "import urllib.request, json; r=urllib.request.urlopen('http://localhost:8000/health'); print(r.read().decode())"
+      register: health_raw
+
+    - name: Parse health JSON
+      set_fact:
+        health_json: "{{ health_raw.stdout | from_json }}"
+
+    - name: Print health response
+      debug:
+        msg: "{{ health_json }}"
+
+    - name: Assert Cassandra is reachable from serve
+      assert:
+        that:
+          - health_json.cassandra == true
+        fail_msg: >
+          Cassandra unreachable from serving layer.
+          Check firewall on infra droplet (port 9042) and CASSANDRA_HOST env var.
+
+    - name: Assert HBase is reachable from serve
+      assert:
+        that:
+          - health_json.hbase == true
+        fail_msg: >
+          HBase unreachable from serving layer.
+          Check firewall on compute droplet (port 9090) and HBASE_HOST env var.
+
+    - name: Assert overall status is ok
+      assert:
+        that:
+          - health_json.status == "ok"
+
+    - name: Spot-check live threats endpoint
+      shell: >
+        docker exec serving
+        python3 -c "import urllib.request, json; r=urllib.request.urlopen('http://localhost:8000/api/threats/live?limit=5'); print(r.read().decode())"
+      register: threats_raw
+
+    - name: Print threat count
+      debug:
+        msg: "Live threats returned: {{ (threats_raw.stdout | from_json).count }}"
+
+    - name: Spot-check ML summary endpoint
+      shell: >
+        docker exec serving
+        python3 -c "import urllib.request, json; r=urllib.request.urlopen('http://localhost:8000/api/ml/summary'); print(r.read().decode())"
+      register: ml_raw
+
+    - name: Print ML status
+      debug:
+        msg: "ML status: {{ (ml_raw.stdout | from_json).status }}"
+
+    - name: Check HTTPS is reachable via Caddy
+      uri:
+        url: "https://grafana.project-demo.tech"
+        status_code: [200, 302]
+        validate_certs: false
+      register: grafana_https
+      ignore_errors: true  # DNS may still be propagating
+
+    - name: Print HTTPS status
+      debug:
+        msg: "Grafana HTTPS: {{ grafana_https.status | default('DNS not yet propagated') }}"
+
+    - name: Summary
+      debug:
+        msg:
+          - "Cluster is healthy!"
+          - "Grafana: https://grafana.project-demo.tech  (admin / admin)"
+          - "FastAPI: internal (Caddy proxy — set EXPOSE_API=true to expose publicly)"
+
+- name: Verify Kafka is producing on compute
+  hosts: compute
+  tasks:
+    - name: Check kafka-producer is running
+      shell: docker inspect --format='{{ "{{" }}.State.Status{{ "}}" }}' kafka-producer
+      register: producer_status
+
+    - name: Assert producer is running
+      assert:
+        that:
+          - producer_status.stdout == "running"
+        fail_msg: "kafka-producer is not running — check: docker logs kafka-producer"
+
+    - name: Check spark-streaming is running
+      shell: docker inspect --format='{{ "{{" }}.State.Status{{ "}}" }}' spark-streaming
+      register: stream_status
+
+    - name: Assert streaming is running
+      assert:
+        that:
+          - stream_status.stdout == "running"
+        fail_msg: "spark-streaming is not running — check: docker logs spark-streaming"
+
+- name: Verify Kafka + Cassandra on infra
+  hosts: infra
+  tasks:
+    - name: List Kafka topics
+      shell: docker exec kafka kafka-topics --bootstrap-server localhost:9092 --list
+      register: topics
+
+    - name: Assert cybersecurity-logs topic exists
+      assert:
+        that:
+          - "'cybersecurity-logs' in topics.stdout"
+        fail_msg: "Topic cybersecurity-logs not found — kafka-setup may have failed"
+
+    - name: Check Cassandra has threat data
+      shell: >
+        docker exec cassandra cqlsh -e
+        "SELECT COUNT(*) FROM cybersecurity.realtime_threats;"
+      register: threat_count
+
+    - name: Print threat count
+      debug:
+        msg: "{{ threat_count.stdout_lines }}"
