@@ -43,6 +43,7 @@ def main():
             attack_type  TEXT,
             PRIMARY KEY (ip_source, last_seen)
         ) WITH CLUSTERING ORDER BY (last_seen DESC)
+          AND default_time_to_live = 86400
     """)
     print("Table created: realtime_threats")
 
@@ -50,12 +51,23 @@ def main():
         CREATE TABLE IF NOT EXISTS ip_threat_summary (
             ip_source    TEXT PRIMARY KEY,
             last_seen    TIMESTAMP,
-            threat_score INT,
-            attack_types LIST<TEXT>,
-            total_alerts INT
+            attack_types SET<TEXT>
         )
     """)
     print("Table created: ip_threat_summary")
+
+    session.execute("""
+        CREATE TABLE IF NOT EXISTS correlated_attacks (
+            ip_source    TEXT,
+            last_seen    TIMESTAMP,
+            first_seen   TIMESTAMP,
+            stages       SET<TEXT>,
+            threat_score INT,
+            PRIMARY KEY (ip_source, last_seen)
+        ) WITH CLUSTERING ORDER BY (last_seen DESC)
+          AND default_time_to_live = 86400
+    """)
+    print("Table created: correlated_attacks")
     print("Cassandra setup complete.")
 
 

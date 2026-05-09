@@ -1,0 +1,136 @@
+---
+- name: Deploy compute layer — Spark, HBase, HDFS, producer, streaming (Droplet 2)
+  hosts: compute
+  become: true
+  vars:
+    compose_file: docker-compose.compute.yml
+    project: /opt/cyber
+
+  tasks:
+    - name: Sync compute compose file
+      synchronize:
+        src: "{{ playbook_dir }}/../../docker-compose.compute.yml"
+        dest: "{{ project }}/"
+
+    - name: Sync docker build contexts
+      synchronize:
+        src: "{{ playbook_dir }}/../../docker/"
+        dest: "{{ project }}/docker/"
+        rsync_opts:
+          - "--exclude=__pycache__"
+          - "--exclude=kafka-setup"  # not needed on compute
+
+    - name: Sync streaming scripts
+      synchronize:
+        src: "{{ playbook_dir }}/../../streaming/"
+        dest: "{{ project }}/streaming/"
+        rsync_opts:
+          - "--exclude=__pycache__"
+
+    - name: Sync batch scripts
+      synchronize:
+        src: "{{ playbook_dir }}/../../batch/"
+        dest: "{{ project }}/batch/"
+        rsync_opts:
+          - "--exclude=__pycache__"
+
+    - name: Sync ML scripts
+      synchronize:
+        src: "{{ playbook_dir }}/../../ml/"
+        dest: "{{ project }}/ml/"
+        rsync_opts:
+          - "--exclude=__pycache__"
+
+    - name: Sync data directory (large CSV — may take a while)
+      synchronize:
+        src: "{{ playbook_dir }}/../../data/"
+        dest: "{{ project }}/data/"
+        rsync_opts:
+          - "--progress"
+          - "--exclude=ml_summary.json"  # not needed on compute
+
+    - name: Inject infra VPC IP into compose (Kafka + Cassandra endpoints)
+      replace:
+        path: "{{ project }}/{{ compose_file }}"
+        regexp: "INFRA_PRIVATE_IP"
+        replace: "{{ infra_private_ip }}"
+
+    - name: Start HDFS namenode and datanode
+      community.docker.docker_compose_v2:
+        project_src: "{{ project }}"
+        files: ["{{ compose_file }}"]
+        services: [namenode, datanode]
+        state: present
+        build: always
+
+    - name: Wait for HDFS namenode web UI
+      wait_for:
+        port: 9870
+        host: localhost
+        timeout: 90
+
+    - name: Start HBase
+      community.docker.docker_compose_v2:
+        project_src: "{{ project }}"
+        files: ["{{ compose_file }}"]
+        services: [hbase]
+        state: present
+
+    - name: Wait for HBase Thrift server
+      wait_for:
+        port: 9090
+        host: localhost
+        timeout: 120
+
+    - name: Start Spark master and workers
+      community.docker.docker_compose_v2:
+        project_src: "{{ project }}"
+        files: ["{{ compose_file }}"]
+        services: [spark-master, spark-worker, spark-worker-2]
+        state: present
+        build: always
+
+    - name: Wait for Spark master UI
+      wait_for:
+        port: 8080
+        host: localhost
+        timeout: 60
+
+    - name: Start spark-batch (idle, available for manual batch jobs)
+      community.docker.docker_compose_v2:
+        project_src: "{{ project }}"
+        files: ["{{ compose_file }}"]
+        services: [spark-batch]
+        state: present
+        build: always
+
+    - name: Start Kafka producer
+      community.docker.docker_compose_v2:
+        project_src: "{{ project }}"
+        files: ["{{ compose_file }}"]
+        services: [producer]
+        state: present
+        build: always
+
+    - name: Start Spark streaming job
+      community.docker.docker_compose_v2:
+        project_src: "{{ project }}"
+        files: ["{{ compose_file }}"]
+        services: [spark-streaming]
+        state: present
+        build: always
+
+    - name: Wait 20s for streaming to initialise
+      pause:
+        seconds: 20
+
+    - name: Check spark-streaming is still running (not exited)
+      shell: >
+        docker inspect --format='{{ "{{" }}.State.Status{{ "}}" }}' spark-streaming
+      register: stream_status
+
+    - name: Assert streaming is running
+      assert:
+        that:
+          - stream_status.stdout == "running"
+        fail_msg: "spark-streaming exited unexpectedly — check: docker logs spark-streaming"

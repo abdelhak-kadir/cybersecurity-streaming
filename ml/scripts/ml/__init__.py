@@ -3,4 +3,5 @@ from .models     import build_random_forest, build_logistic_regression, train, c
 from .evaluation import (compute_metrics, print_confusion_matrix,
                          print_feature_importances, add_predicted_labels,
                          print_comparison_table, print_final_report)
-from .storage    import save_predictions, save_model, save_to_hbase
+from .storage    import save_predictions, save_model, save_to_hbase, save_prediction_run_to_hbase
+from .           import features

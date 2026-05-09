@@ -1,0 +1,5 @@
+pytest>=8.0
+httpx>=0.27       # required by FastAPI TestClient
+fastapi==0.111.0
+pydantic==2.7.1
+requests==2.31.0

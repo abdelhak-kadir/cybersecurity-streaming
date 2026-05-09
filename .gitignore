@@ -7,3 +7,25 @@ venv/
 data/
 batch/data/
 **/_temporary/
+
+# Terraform state and secrets
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+terraform/*.tfstate
+terraform/*.tfstate.backup
+terraform/*.tfvars
+
+# Ansible generated inventory (contains real IPs)
+ansible/inventory.ini
+
+# LaTeX report (kept local only)
+report.tex
+report.pdf
+report.aux
+report.fls
+report.fdb_latexmk
+report.synctex.gz
+report.toc
+report.lof
+report.lot
+report.out

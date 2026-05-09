@@ -5,7 +5,6 @@ Persistence : sauvegarde du modèle dans HDFS
 et des métriques / prédictions dans HBase.
 """
 
-import happybase
 from pyspark.sql import DataFrame
 from pyspark.sql.functions import col
 
@@ -39,6 +38,7 @@ def save_to_hbase(metrics_rf: dict, metrics_lr: dict,
       - importance des features
       - échantillon de prédictions incorrectes
     """
+    import happybase  # lazy — avoids import-time dependency for non-HBase environments
     try:
         connection = happybase.Connection(host=hbase_host, port=9090)
         tables = [t.decode() for t in connection.tables()]
@@ -60,8 +60,8 @@ def save_to_hbase(metrics_rf: dict, metrics_lr: dict,
             b"metrics:precision":  f"{metrics_rf['precision']:.6f}".encode(),
             b"metrics:cv_best_f1": f"{best_f1:.6f}".encode(),
             b"metrics:model_type": b"RandomForestClassifier",
-            b"metrics:num_trees":  b"100",
-            b"metrics:max_depth":  b"10",
+            b"metrics:num_trees":  b"30",
+            b"metrics:max_depth":  b"8",
             b"metrics:model_path": model_path.encode(),
         })
 
@@ -71,7 +71,7 @@ def save_to_hbase(metrics_rf: dict, metrics_lr: dict,
             b"metrics:f1_score":   f"{metrics_lr['f1']:.6f}".encode(),
             b"metrics:precision":  f"{metrics_lr['precision']:.6f}".encode(),
             b"metrics:model_type": b"LogisticRegression",
-            b"metrics:max_iter":   b"100",
+            b"metrics:max_iter":   b"40",
             b"metrics:reg_param":  b"0.01",
         })
 
@@ -101,3 +101,71 @@ def save_to_hbase(metrics_rf: dict, metrics_lr: dict,
     except Exception as e:
         print(f" Attention: HBase inaccessible ({e})")
         print("  → Les prédictions restent disponibles dans HDFS")
+
+
+def save_prediction_run_to_hbase(
+    preds_df: DataFrame,
+    total_rows: int,
+    run_ts: str,
+    model_path: str,
+    metrics: dict = None,
+    hbase_host: str = "hbase",
+):
+    """
+    Saves a batch-inference run summary to HBase table ml_predictions:
+      - RUN_<timestamp>   : run metadata + prediction counts per label
+      - RUN_<timestamp>_METRICS : accuracy/f1/precision if ground truth was available
+    """
+    import happybase  # lazy — avoids import-time dependency for non-HBase environments
+    try:
+        connection = happybase.Connection(host=hbase_host, port=9090)
+        tables = [t.decode() for t in connection.tables()]
+
+        if "ml_predictions" not in tables:
+            connection.create_table("ml_predictions", {
+                "metrics": dict(),
+                "run":     dict(),
+            })
+            print(" Table ml_predictions créée dans HBase")
+
+        table = connection.table("ml_predictions")
+
+        # ── Run metadata ───────────────────────────────────────────
+        row_key = f"RUN_{run_ts}".encode()
+        run_data = {
+            b"run:timestamp":   run_ts.encode(),
+            b"run:total_rows":  str(total_rows).encode(),
+            b"run:model_path":  model_path.encode(),
+            b"run:script":      b"09_ml_predict.py",
+        }
+
+        # Prediction count per label
+        label_counts = (
+            preds_df
+            .groupBy("predicted_label")
+            .count()
+            .collect()
+        )
+        for lc in label_counts:
+            col_key = f"run:count_{lc['predicted_label']}".encode()
+            run_data[col_key] = str(lc["count"]).encode()
+
+        table.put(row_key, run_data)
+
+        # ── Optional metrics (when ground truth available) ─────────
+        if metrics:
+            table.put(
+                f"RUN_{run_ts}_METRICS".encode(),
+                {
+                    b"metrics:accuracy":  f"{metrics['accuracy']:.6f}".encode(),
+                    b"metrics:f1_score":  f"{metrics['f1']:.6f}".encode(),
+                    b"metrics:precision": f"{metrics['precision']:.6f}".encode(),
+                }
+            )
+
+        connection.close()
+        print(f" HBase : run {run_ts} sauvegardé dans ml_predictions")
+
+    except Exception as e:
+        print(f" Attention: HBase inaccessible ({e})")
+        print("  → Le résumé du run reste disponible dans HDFS")

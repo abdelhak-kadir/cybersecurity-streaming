@@ -17,8 +17,9 @@ from kafka.errors import NoBrokersAvailable
 # ── Config ────────────────────────────────────────────────────────────────
 KAFKA_BROKER  = os.getenv("KAFKA_BROKER", "kafka:29092")
 KAFKA_TOPIC   = "cybersecurity-logs"
-CSV_FILE      = os.getenv("CSV_FILE", "/data/cybersecurity_logs.csv")
+CSV_FILE      = os.getenv("CSV_FILE", "/data/cybersecurity_threat_detection_logs.csv")
 DELAY_SECONDS = float(os.getenv("SEND_DELAY", "0.1"))  # 100ms = 10 events/sec
+MAX_MESSAGES = int(os.getenv("MAX_MESSAGES", "0"))  # 0 = send the whole file
 
 
 def wait_for_kafka(broker, retries=10, delay=5):
@@ -59,7 +60,7 @@ def main():
 
     if not os.path.exists(CSV_FILE):
         print(f"CSV file not found: {CSV_FILE}")
-        print("Place your dataset at /data/cybersecurity_logs.csv")
+        print("Place your dataset at /data/cybersecurity_threat_detection_logs.csv")
         print("Running in demo mode with synthetic data...")
         run_demo_mode(producer)
         return
@@ -77,6 +78,8 @@ def main():
             sent += 1
             if sent % 100 == 0:
                 print(f"Sent {sent} messages...")
+            if MAX_MESSAGES and sent >= MAX_MESSAGES:
+                break
             time.sleep(DELAY_SECONDS)
 
     producer.flush()

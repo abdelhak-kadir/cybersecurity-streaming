@@ -36,8 +36,8 @@ def build_random_forest():
     rf = RandomForestClassifier(
         featuresCol="features",
         labelCol="label",
-        numTrees=100,
-        maxDepth=10,
+        numTrees=30,
+        maxDepth=8,
         seed=42,
         featureSubsetStrategy="sqrt"
     )
@@ -50,7 +50,7 @@ def build_logistic_regression():
     lr = LogisticRegression(
         featuresCol="features",
         labelCol="label",
-        maxIter=100,
+        maxIter=40,
         regParam=0.01,
         elasticNetParam=0.0,
         family="multinomial"
@@ -63,9 +63,9 @@ def train(pipeline, train_df):
     return pipeline.fit(train_df)
 
 
-def cross_validate(train_df, n_folds: int = 3, sample_frac: float = 0.3):
+def cross_validate(train_df, n_folds: int = 2, sample_frac: float = 0.02):
     """
-    Cross-validation sur un sous-ensemble (pour la vitesse).
+    Cross-validation sur un sous-ensemble (pour la vitesse en local Docker).
     Retourne (best_f1, best_params, cv_model).
     """
     label_indexer, assembler, scaler = _base_stages()
@@ -76,8 +76,8 @@ def cross_validate(train_df, n_folds: int = 3, sample_frac: float = 0.3):
 
     param_grid = (
         ParamGridBuilder()
-        .addGrid(rf_cv.numTrees, [50, 100])
-        .addGrid(rf_cv.maxDepth, [5, 10])
+        .addGrid(rf_cv.numTrees, [50])
+        .addGrid(rf_cv.maxDepth, [5])
         .build()
     )
     evaluator = MulticlassClassificationEvaluator(

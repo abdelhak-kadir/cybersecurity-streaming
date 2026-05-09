@@ -1,14 +1,41 @@
+# Load .env and export every variable to child processes.
+# This means DIGITALOCEAN_TOKEN, TF_VAR_*, etc. are available to
+# terraform, ansible, and all shell commands without touching .zshrc.
+ifneq (,$(wildcard .env))
+  include .env
+  export
+endif
+
 .PHONY: batch stream all down-batch down-stream down clean \
         status logs shell-kafka shell-cassandra shell-spark shell-batch \
         batch-load batch-analytics batch-hbase batch-all \
         ml-train ml-predict ml-all \
-        verify verify-all watch-kafka restart-producer restart-streaming
+        verify verify-all watch-kafka restart-producer restart-streaming \
+        test reset-schema serving-up serving-logs serving-docs serving-test serving-ip \
+        grafana-up grafana-open \
+        tf-init tf-apply tf-destroy tf-ips \
+        gen-inventory \
+        ansible-install-docker ansible-deploy-infra ansible-deploy-compute \
+        ansible-deploy-serve ansible-verify \
+        deploy-all sync-ml-summary ansible-deploy-batch
 
 SPARK_BATCH_EXEC=docker compose exec spark-batch spark-submit --master spark://spark-master:7077
 
 # ══════════════════════════════════════════════════════════════════
 #  Start / Stop
 # ══════════════════════════════════════════════════════════════════
+
+## DESTRUCTIVE: drop and recreate Cassandra tables (requires running stack)
+## Useful after a schema change; normal restarts do NOT need this.
+reset-schema:
+	@echo "WARNING: this will drop all Cassandra threat data. Ctrl-C to abort."
+	@sleep 3
+	docker exec -i cassandra cqlsh < docker/cassandra-reset.cql
+	@echo "Schema reset complete."
+
+## Run unit tests inside Docker (no live Cassandra/HBase needed)
+test:
+	docker compose --profile test run --rm test
 
 ## Start only the batch stack (HDFS + HBase + Spark workers)
 batch:
@@ -143,9 +170,16 @@ ml-all: ml-train ml-predict
 
 # ── Start serving layer only ──────────────────────────────────────────────────
 serving-up:
-	docker compose up -d --build serving
+	docker compose --profile serve up -d --build serving
 	@echo "Serving layer starting at http://localhost:8000"
 	@echo "API docs at: http://localhost:8000/docs"
+
+grafana-up:
+	docker compose --profile serve up -d --build grafana
+	@echo "Grafana starting at http://localhost:3000 (admin / admin)"
+
+grafana-open:
+	open http://localhost:3000
 
 # ── Serving layer logs ────────────────────────────────────────────────────────
 serving-logs:
@@ -174,3 +208,71 @@ serving-test:
 # Usage: make serving-ip IP=192.168.1.10
 serving-ip:
 	curl -s "http://localhost:8000/api/ip/$(IP)" | python3 -m json.tool
+
+# ══════════════════════════════════════════════════════════════════
+#  Digital Ocean — Terraform + Ansible deployment
+#  Prerequisites:
+#    brew install terraform ansible
+#    ssh-keygen -t ed25519 -f ~/.ssh/do_cyber
+#    export DIGITALOCEAN_TOKEN="your_token"
+# ══════════════════════════════════════════════════════════════════
+
+# ── Terraform ─────────────────────────────────────────────────────
+tf-init:
+	cd terraform && terraform init
+
+tf-apply:
+	cd terraform && terraform apply
+
+tf-destroy:
+	cd terraform && terraform destroy
+
+tf-ips:
+	cd terraform && terraform output
+
+# ── Ansible ───────────────────────────────────────────────────────
+
+## Generate ansible/inventory.ini from terraform outputs (run after tf-apply)
+gen-inventory:
+	bash ansible/generate_inventory.sh
+
+## Install Docker CE on all 3 droplets
+ansible-install-docker:
+	ansible-playbook -i ansible/inventory.ini ansible/playbooks/install_docker.yml
+
+## Deploy Kafka + Cassandra to Droplet 1
+ansible-deploy-infra:
+	ansible-playbook -i ansible/inventory.ini ansible/playbooks/deploy_infra.yml
+
+## Deploy Spark + HBase + HDFS + streaming to Droplet 2
+ansible-deploy-compute:
+	ansible-playbook -i ansible/inventory.ini ansible/playbooks/deploy_compute.yml
+
+## Deploy FastAPI + Grafana to Droplet 3
+ansible-deploy-serve:
+	ansible-playbook -i ansible/inventory.ini ansible/playbooks/deploy_serve.yml
+
+## Run health checks across all droplets
+ansible-verify:
+	ansible-playbook -i ansible/inventory.ini ansible/playbooks/verify.yml
+
+## Run the full batch pipeline on compute (loads CSV→HDFS, analytics, writes to HBase)
+ansible-deploy-batch:
+	ansible-playbook -i ansible/inventory.ini ansible/playbooks/deploy_batch.yml
+
+## Copy updated ml_summary.json from compute to serve after a batch/ML run
+sync-ml-summary:
+	ansible-playbook -i ansible/inventory.ini ansible/playbooks/sync_ml_summary.yml
+
+## Full deployment from scratch — provisions infra, deploys all layers,
+## runs the batch pipeline, and verifies the cluster.
+deploy-all: tf-apply gen-inventory ansible-install-docker \
+            ansible-deploy-infra ansible-deploy-compute ansible-deploy-serve \
+            ansible-deploy-batch ansible-verify
+	@echo ""
+	@echo "Cluster deployed successfully."
+	@echo "Serve IP:  $$(cd terraform && terraform output -raw serve_ip)"
+	@echo "Grafana:   https://$(GRAFANA_SUBDOMAIN)"
+	@echo "FastAPI:   https://$(API_SUBDOMAIN)  (only if EXPOSE_API=true)"
+	@echo ""
+	@echo "TLS: Caddy handles certs automatically via Let's Encrypt."

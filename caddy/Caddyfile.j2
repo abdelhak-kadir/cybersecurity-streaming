@@ -1,0 +1,49 @@
+# Managed by Ansible — do not edit directly on the server.
+# Regenerate with: make ansible-deploy-serve
+#
+# Variables substituted at deploy time:
+#   grafana_subdomain  e.g. grafana.example.com
+#   api_subdomain      e.g. api.example.com  (only when expose_api is true)
+#   acme_email         used by Let's Encrypt for cert expiry notices
+
+{
+    email {{ acme_email }}
+}
+
+# ── Grafana dashboard — always public ────────────────────────────────────────
+{{ grafana_subdomain }} {
+    reverse_proxy grafana:3000
+
+    # Security headers
+    header {
+        X-Frame-Options SAMEORIGIN
+        X-Content-Type-Options nosniff
+        Referrer-Policy strict-origin-when-cross-origin
+        X-XSS-Protection "1; mode=block"
+        -Server
+    }
+
+    log {
+        output stdout
+        format console
+    }
+}
+
+{% if expose_api | bool %}
+# ── FastAPI — exposed only when EXPOSE_API=true ──────────────────────────────
+{{ api_subdomain }} {
+    reverse_proxy serving:8000
+
+    header {
+        X-Frame-Options DENY
+        X-Content-Type-Options nosniff
+        Referrer-Policy strict-origin-when-cross-origin
+        -Server
+    }
+
+    log {
+        output stdout
+        format console
+    }
+}
+{% endif %}

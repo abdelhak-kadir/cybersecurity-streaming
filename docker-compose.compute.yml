@@ -1,0 +1,162 @@
+version: '3.8'
+
+# ══════════════════════════════════════════════════════════════════
+#  Droplet 2 — "compute"
+#  Services: Spark master+workers, HBase, HDFS, producer, streaming
+#
+#  INFRA_PRIVATE_IP is replaced by Ansible before `docker compose up`
+#  with the real VPC private IP of Droplet 1 (Kafka + Cassandra).
+# ══════════════════════════════════════════════════════════════════
+
+services:
+
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: namenode
+    environment:
+      - CLUSTER_NAME=cyber-hadoop
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+    ports:
+      - "9870:9870"
+      - "9000:9000"
+    volumes:
+      - hdfs-namenode:/hadoop/dfs/name
+      - ./data:/data
+    networks:
+      - cyber-net
+
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: datanode
+    depends_on:
+      - namenode
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+    volumes:
+      - hdfs-datanode:/hadoop/dfs/data
+    networks:
+      - cyber-net
+
+  hbase:
+    image: dajobe/hbase
+    container_name: hbase
+    # hostname must remain hbase-docker — the image registers itself in ZK under this name
+    hostname: hbase-docker
+    depends_on:
+      - namenode
+    ports:
+      - "9090:9090"
+      - "16000:16000"
+      - "16010:16010"
+      - "16020:16020"
+      - "16030:16030"
+    command: sh -lc "start-hbase.sh && hbase thrift start -p 9090"
+    networks:
+      cyber-net:
+        aliases:
+          - hbase-docker
+
+  spark-master:
+    build: ./docker/spark
+    container_name: spark-master
+    environment:
+      - SPARK_MODE=master
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+    command: bash -c "/opt/spark/sbin/start-master.sh -h spark-master && tail -f /opt/spark/logs/*"
+    networks:
+      - cyber-net
+
+  spark-worker:
+    build: ./docker/spark
+    container_name: spark-worker
+    depends_on:
+      - spark-master
+    environment:
+      - SPARK_WORKER_MEMORY=2G
+      - SPARK_WORKER_CORES=2
+    volumes:
+      - ./data:/data
+    command: bash -c "/opt/spark/sbin/start-worker.sh spark://spark-master:7077 && tail -f /opt/spark/logs/*"
+    networks:
+      - cyber-net
+
+  spark-worker-2:
+    build: ./docker/spark
+    depends_on:
+      - spark-master
+    environment:
+      - SPARK_WORKER_MEMORY=2G
+      - SPARK_WORKER_CORES=2
+    volumes:
+      - ./data:/data
+    command: bash -c "/opt/spark/sbin/start-worker.sh spark://spark-master:7077 && tail -f /opt/spark/logs/*"
+    networks:
+      - cyber-net
+
+  spark-batch:
+    build: ./docker/spark
+    container_name: spark-batch
+    depends_on:
+      - namenode
+      - hbase
+      - spark-master
+    volumes:
+      - ./batch/scripts:/app
+      - ./data:/data
+      - ./ml/scripts:/ml
+    working_dir: /app
+    command: tail -f /dev/null
+    networks:
+      - cyber-net
+
+  producer:
+    build: ./docker/spark
+    container_name: kafka-producer
+    volumes:
+      - ./streaming:/app
+      - ./data:/data
+    environment:
+      - CSV_FILE=/data/cybersecurity_threat_detection_logs.csv
+      - SEND_DELAY=0.01
+      - MAX_MESSAGES=0
+      # Kafka is on Droplet 1 — use its VPC private IP
+      - KAFKA_BROKER=INFRA_PRIVATE_IP:9092
+    working_dir: /app
+    command: python3 -u kafka_producer.py
+    networks:
+      - cyber-net
+
+  spark-streaming:
+    build: ./docker/spark
+    container_name: spark-streaming
+    restart: unless-stopped   # auto-restart if OOM-killed by batch jobs
+    depends_on:
+      - spark-master
+    volumes:
+      - ./streaming:/app
+      - ./data:/data
+      - spark-checkpoints:/tmp/spark-checkpoints-v3
+    environment:
+      # Kafka and Cassandra are on Droplet 1 — use VPC private IP
+      - KAFKA_BROKER=INFRA_PRIVATE_IP:9092
+      - CASSANDRA_HOST=INFRA_PRIVATE_IP
+    working_dir: /app
+    command: >
+      spark-submit
+      --master spark://spark-master:7077
+      --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.3.0,com.datastax.spark:spark-cassandra-connector_2.12:3.3.0
+      --conf spark.cassandra.connection.host=INFRA_PRIVATE_IP
+      spark_streaming.py
+    networks:
+      - cyber-net
+
+volumes:
+  hdfs-namenode: {}
+  hdfs-datanode: {}
+  spark-checkpoints: {}
+
+networks:
+  cyber-net:
+    driver: bridge

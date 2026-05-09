@@ -2,11 +2,12 @@
 spark_streaming.py
 ------------------
 Consumes logs from Kafka topic 'cybersecurity-logs' and applies
-3 real-time detection rules:
+4 real-time detection rules:
 
   1. Brute-force    — 5+ blocked requests from same IP in 1 minute
   2. Attack signatures — known tool strings in user_agent / request_path
   3. Volume anomaly — >10 MB transferred by same IP in 10 seconds
+  4. Port scan      — Nmap/Masscan-style reconnaissance from same IP
 
 Detected threats are written to Cassandra table: cybersecurity.realtime_threats
 """
@@ -15,7 +16,7 @@ import os
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col, from_json, window, count,
-    sum as spark_sum, current_timestamp, lit 
+    sum as spark_sum, current_timestamp, lit, lower
 )
 from pyspark.sql.types import (
     StructType, StructField,
@@ -29,9 +30,15 @@ CASSANDRA_HOST    = os.getenv("CASSANDRA_HOST",  "cassandra")
 CASSANDRA_KEYSPACE = "cybersecurity"
 CASSANDRA_TABLE   = "realtime_threats"
 SUMMARY_TABLE      = "ip_threat_summary"
-CHECKPOINT_BASE    = "/tmp/spark-checkpoints"
+CORRELATION_TABLE  = "correlated_attacks"
+CHECKPOINT_BASE    = os.getenv("CHECKPOINT_BASE", "/tmp/spark-checkpoints-v3")
  
 TEN_MB = 10 * 1024 * 1024  # 10 485 760 bytes
+MAX_THREATS_PER_BATCH = int(os.getenv("MAX_THREATS_PER_BATCH", "2000"))
+CORRELATION_WINDOW_SECONDS = int(os.getenv("CORRELATION_WINDOW_SECONDS", "600"))
+CORRELATION_SCORE = 100
+RECON_STAGE = "port-scan"
+EXPLOIT_STAGES = {"attack-signature", "brute-force", "data-exfiltration"}
 
 
 # ── Spark session ─────────────────────────────────────────────────────────
@@ -74,7 +81,8 @@ logs = raw_stream \
     .selectExpr("CAST(value AS STRING) as json_str") \
     .select(from_json(col("json_str"), log_schema).alias("d")) \
     .select("d.*") \
-    .withWatermark("timestamp", "30 seconds")
+    .withColumn("arrival_time", current_timestamp()) \
+    .withWatermark("arrival_time", "30 seconds")
 
 
 # ── Helper: write a stream to Cassandra ───────────────────────────────────
@@ -97,67 +105,45 @@ def write_to_cassandra(stream, query_name: str):
         .option("checkpointLocation", f"{CHECKPOINT_BASE}/{query_name}") \
         .start()
 
-# ── Helper: upsert cumulative summary in ip_threat_summary ───────────────
-def _get_cassandra_session():
-    """Return a Cassandra session (called inside each executor task)."""
-    cluster = Cluster([CASSANDRA_HOST])
-    session = cluster.connect(CASSANDRA_KEYSPACE)
-    return session
+# ── Executor-local Cassandra session singleton ────────────────────────────
+# A new Cluster object is created only once per Spark executor process,
+# avoiding the connection-per-batch overhead of the previous implementation.
+_cassandra_cluster = None
+_cassandra_session = None
 
-def upsert_summary(ip, threat_score, attack_type, last_seen):
-    """
-    Read existing ip_threat_summary row for this IP,
-    merge scores/types/counts, write back.
-    Import is inside the function to avoid top-level serialization issues.
-    """
-    from cassandra.cluster import Cluster
- 
-    cluster = Cluster([CASSANDRA_HOST])
-    session = cluster.connect(CASSANDRA_KEYSPACE)
- 
-    select_stmt = session.prepare(
-        f"SELECT threat_score, attack_types, total_alerts FROM {SUMMARY_TABLE} WHERE ip_source = ?"
-    )
-    upsert_stmt = session.prepare(
-        f"""
-        UPDATE {SUMMARY_TABLE}
-        SET last_seen    = ?,
-            threat_score = ?,
-            attack_types = ?,
-            total_alerts = ?
-        WHERE ip_source = ?
-        """
-    )
- 
-    existing = session.execute(select_stmt, [ip]).one()
- 
-    if existing:
-        merged_score  = max(threat_score, existing.threat_score or 0)
-        merged_types  = list(set(existing.attack_types or []) | {attack_type})
-        merged_alerts = (existing.total_alerts or 0) + 1
-    else:
-        merged_score  = threat_score
-        merged_types  = [attack_type]
-        merged_alerts = 1
- 
-    session.execute(upsert_stmt, [last_seen, merged_score, merged_types, merged_alerts, ip])
-    cluster.shutdown()
+
+def _get_session():
+    global _cassandra_cluster, _cassandra_session
+    if _cassandra_session is None:
+        from cassandra.cluster import Cluster
+        _cassandra_cluster = Cluster([CASSANDRA_HOST])
+        _cassandra_session = _cassandra_cluster.connect(CASSANDRA_KEYSPACE)
+    return _cassandra_session
+
 
 # ── Combined foreachBatch: write to both tables ───────────────────────────
 def make_batch_writer(query_name: str):
     """
     Returns a foreachBatch function that:
-      1. Appends all rows to realtime_threats
-      2. Upserts each row's IP into ip_threat_summary
+      1. Appends all rows to realtime_threats (TTL 24h enforced by schema)
+      2. Atomically updates ip_threat_summary using SET addition (no read needed)
+      3. Detects multi-step attacks for IPs touched by this micro-batch using
+         concurrent Cassandra queries (one per unique IP, issued in parallel)
     """
     def save_batch(batch_df, batch_id):
-        from cassandra.cluster import Cluster
+        from datetime import datetime, timedelta
+        from cassandra.concurrent import execute_concurrent_with_args
+
         n = batch_df.count()
         if n == 0:
             return
- 
+        if n > MAX_THREATS_PER_BATCH:
+            print(f"[{query_name}] batch {batch_id} — capping {n} threat(s) to {MAX_THREATS_PER_BATCH}")
+            batch_df = batch_df.orderBy(col("last_seen").desc()).limit(MAX_THREATS_PER_BATCH)
+            n = MAX_THREATS_PER_BATCH  # avoid a second full scan just for the log line
+
         print(f"[{query_name}] batch {batch_id} — {n} threat(s)")
- 
+
         # Write to realtime_threats
         batch_df.write \
             .format("org.apache.spark.sql.cassandra") \
@@ -165,37 +151,85 @@ def make_batch_writer(query_name: str):
             .mode("append") \
             .save()
 
-        # One Cassandra connection per batch, not per row
-        cluster = Cluster([CASSANDRA_HOST])
-        session = cluster.connect(CASSANDRA_KEYSPACE)
+        session = _get_session()
 
-        select_stmt = session.prepare(
-            f"SELECT threat_score, attack_types, total_alerts FROM {SUMMARY_TABLE} WHERE ip_source = ?"
-        )
-        upsert_stmt = session.prepare(
+        # Atomic SET addition — no read needed, idempotent on retry.
+        # threat_score is intentionally omitted: the serving layer derives the
+        # max score directly from realtime_threats (bounded by 24h TTL) so there
+        # is no risk of a stale low-score overwriting a prior high-score entry.
+        update_summary = session.prepare(
             f"""UPDATE {SUMMARY_TABLE}
-                SET last_seen = ?, threat_score = ?, attack_types = ?, total_alerts = ?
-                WHERE ip_source = ?"""
+                SET last_seen    = ?,
+                    attack_types = attack_types + ?
+                WHERE ip_source  = ?"""
+        )
+        # Time filter pushed into CQL — avoids fetching data outside the
+        # correlation window and eliminates the Python-side post-filter.
+        select_recent = session.prepare(
+            f"""SELECT last_seen, attack_type
+                FROM {CASSANDRA_TABLE}
+                WHERE ip_source = ? AND last_seen >= ?
+                LIMIT 100"""
+        )
+        insert_correlated = session.prepare(
+            f"""INSERT INTO {CORRELATION_TABLE}
+                (ip_source, last_seen, first_seen, stages, threat_score)
+                VALUES (?, ?, ?, ?, ?)"""
+        )
+        insert_realtime = session.prepare(
+            f"""INSERT INTO {CASSANDRA_TABLE}
+                (ip_source, last_seen, threat_score, attack_type)
+                VALUES (?, ?, ?, ?)"""
         )
 
-        rows = batch_df.select("ip_source", "threat_score", "attack_type", "last_seen").collect()
+        rows = batch_df.select("ip_source", "attack_type", "last_seen").collect()
         for row in rows:
             try:
-                existing = session.execute(select_stmt, [row["ip_source"]]).one()
-                if existing:
-                    merged_score  = max(row["threat_score"], existing.threat_score or 0)
-                    merged_types  = list(set(existing.attack_types or []) | {row["attack_type"]})
-                    merged_alerts = (existing.total_alerts or 0) + 1
-                else:
-                    merged_score, merged_types, merged_alerts = row["threat_score"], [row["attack_type"]], 1
-
-                session.execute(upsert_stmt, [
-                    row["last_seen"], merged_score, merged_types, merged_alerts, row["ip_source"]
+                session.execute(update_summary, [
+                    row["last_seen"], {row["attack_type"]}, row["ip_source"]
                 ])
             except Exception as e:
                 print(f"  [summary] ERROR for {row['ip_source']}: {e}")
 
-        cluster.shutdown()
+        # Fetch recent history for all unique IPs concurrently rather than
+        # serially — avoids N round-trips blocking the micro-batch.
+        cutoff = datetime.utcnow() - timedelta(seconds=CORRELATION_WINDOW_SECONDS)
+        unique_ips = list({row["ip_source"] for row in rows})
+        concurrent_results = execute_concurrent_with_args(
+            session,
+            select_recent,
+            [(ip, cutoff) for ip in unique_ips],
+            concurrency=20,
+            raise_on_first_error=False,
+        )
+        ip_recent: dict = {}
+        for i, (success, result) in enumerate(concurrent_results):
+            if success:
+                ip_recent[unique_ips[i]] = list(result)
+            else:
+                print(f"  [correlation] SELECT failed for {unique_ips[i]}: {result}")
+
+        for ip, recent_rows in ip_recent.items():
+            try:
+                stages = {r.attack_type for r in recent_rows if r.attack_type}
+                if RECON_STAGE not in stages or not (stages & EXPLOIT_STAGES):
+                    continue
+                event_times = [r.last_seen for r in recent_rows if r.last_seen]
+                first_seen = min(event_times)
+                last_seen = max(event_times)
+                correlated_stages = stages - {"multi-step-attack"}
+                session.execute(insert_correlated, [
+                    ip, last_seen, first_seen, correlated_stages, CORRELATION_SCORE
+                ])
+                session.execute(insert_realtime, [
+                    ip, last_seen, CORRELATION_SCORE, "multi-step-attack"
+                ])
+                session.execute(update_summary, [
+                    last_seen, {"multi-step-attack"}, ip
+                ])
+                print(f"  [correlation] {ip}: {sorted(correlated_stages)}")
+            except Exception as e:
+                print(f"  [correlation] ERROR for {ip}: {e}")
 
     return save_batch
 
@@ -204,7 +238,7 @@ def make_batch_writer(query_name: str):
 brute_force = logs \
     .filter(col("action") == "blocked") \
     .groupBy(
-        window(col("timestamp"), "1 minute"),
+        window(col("arrival_time"), "1 minute"),
         col("source_ip")
     ) \
     .agg(count("*").alias("blocked_count")) \
@@ -241,7 +275,7 @@ signatures = logs \
     .filter(sig_filter) \
     .select(
         col("source_ip").alias("ip_source"),
-        col("timestamp").alias("last_seen"),
+        current_timestamp().alias("last_seen"),
         lit(95).alias("threat_score"),       # highest score — no false positives
         lit("attack-signature").alias("attack_type"),
     )
@@ -259,7 +293,7 @@ print("Detection 2 started: attack signatures")
 # Rule: same IP transfers more than 10 MB in any 10-second window
 volume_anomaly = logs \
     .groupBy(
-        window(col("timestamp"), "10 seconds"),
+        window(col("arrival_time"), "10 seconds"),
         col("source_ip")
     ) \
     .agg(spark_sum("bytes_transferred").alias("total_bytes")) \
@@ -280,6 +314,42 @@ q3 = volume_anomaly.writeStream \
 print("Detection 3 started: volume anomaly")
 
 
+# ── DETECTION 4: Port scan / reconnaissance ──────────────────────────────
+# Trigger only on well-known scanner tool fingerprints in the user-agent.
+# The previous broad catch of ALL blocked TCP/UDP/ICMP traffic was flagging
+# normal firewall denies as port scans, producing false positives for every IP
+# with as few as 3 blocked packets in a minute.
+scan_filter = (
+    lower(col("user_agent")).contains("nmap")
+    | lower(col("user_agent")).contains("masscan")
+    | lower(col("user_agent")).contains("zmap")
+    | lower(col("user_agent")).contains("zgrab")
+)
+
+port_scan = logs \
+    .filter(scan_filter) \
+    .groupBy(
+        window(col("arrival_time"), "1 minute"),
+        col("source_ip")
+    ) \
+    .agg(count("*").alias("probe_count")) \
+    .filter(col("probe_count") >= 1) \
+    .select(
+        col("source_ip").alias("ip_source"),
+        current_timestamp().alias("last_seen"),
+        lit(75).alias("threat_score"),
+        lit("port-scan").alias("attack_type"),
+    )
+
+q4 = port_scan.writeStream \
+    .outputMode("update") \
+    .foreachBatch(make_batch_writer("port-scan-stream")) \
+    .queryName("port-scan-stream") \
+    .option("checkpointLocation", f"{CHECKPOINT_BASE}/port-scan-stream") \
+    .start()
+print("Detection 4 started: port scan")
+
+
 # ── Wait for all queries to finish ────────────────────────────────────────
-print("All 3 detection streams are running. Press Ctrl+C to stop.")
+print("All 4 detection streams are running. Press Ctrl+C to stop.")
 spark.streams.awaitAnyTermination()

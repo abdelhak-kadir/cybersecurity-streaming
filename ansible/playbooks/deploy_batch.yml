@@ -1,0 +1,157 @@
+---
+# Runs the full batch pipeline on the compute droplet.
+# Must run AFTER deploy_compute (HDFS, HBase, and spark-batch must be up).
+# Each spark-submit runs sequentially; the whole pipeline takes ~10-20 min.
+
+- name: Run batch pipeline on compute (Droplet 2)
+  hosts: compute
+  become: true
+  vars:
+    project: /opt/cyber
+    compose_file: docker-compose.compute.yml
+    # Cap batch driver + executor memory so spark-streaming isn't OOM-killed.
+    # s-4vcpu-8GB: ~6.5 GB usable. Streaming keeps ~1.5 GB, batch gets 4 GB total.
+    submit: >-
+      docker exec spark-batch spark-submit
+      --master spark://spark-master:7077
+      --driver-memory 1g
+      --executor-memory 1500m
+
+  tasks:
+
+    - name: Confirm HDFS namenode is healthy
+      wait_for:
+        port: 9870
+        host: localhost
+        timeout: 60
+
+    - name: Confirm HBase Thrift is ready
+      wait_for:
+        port: 9090
+        host: localhost
+        timeout: 60
+
+    - name: Confirm spark-batch container is running
+      shell: docker inspect --format='{{ "{{" }}.State.Status{{ "}}" }}' spark-batch
+      register: batch_status
+      failed_when: batch_status.stdout != "running"
+
+    # ── Step 1: Load CSV into HDFS (largest step — may take 10-15 min) ─────────
+
+    - name: "[1/7] Load CSV into HDFS"
+      shell: "{{ submit }} /app/01_load_hdfs.py"
+      args:
+        chdir: "{{ project }}"
+      register: load_result
+      async: 5400   # 90 min — script does count()+write+verify on 834 MB CSV
+      poll: 30
+
+    - name: Show HDFS load output
+      debug:
+        msg: "{{ load_result.stdout_lines[-10:] }}"
+
+    # ── Steps 2-6: Analytics (write intermediate results) ──────────────────────
+
+    - name: "[2/7] Top IPs by threat score"
+      shell: "{{ submit }} /app/02_top_ips.py"
+      args:
+        chdir: "{{ project }}"
+      async: 1800
+      poll: 15
+
+    - name: "[3a/7] Port scan detection"
+      shell: "{{ submit }} /app/03_port_scans.py"
+      args:
+        chdir: "{{ project }}"
+      async: 1800
+      poll: 15
+
+    - name: "[3b/7] Threat volume analysis"
+      shell: "{{ submit }} /app/03_Threat_Volume_Analysis.py"
+      args:
+        chdir: "{{ project }}"
+      async: 1800
+      poll: 15
+
+    - name: "[4/7] Attack evolution timeline"
+      shell: "{{ submit }} /app/04_Attack_Evolution.py"
+      args:
+        chdir: "{{ project }}"
+      async: 1800
+      poll: 15
+
+    - name: "[5/7] Brute force analysis"
+      shell: "{{ submit }} /app/05_brute_force.py"
+      args:
+        chdir: "{{ project }}"
+      async: 1800
+      poll: 15
+
+    - name: "[6/7] SQLi / XSS detection"
+      shell: "{{ submit }} /app/06_SQLi_XSS.py"
+      args:
+        chdir: "{{ project }}"
+      async: 1800
+      poll: 15
+
+    # ── Step 7: Write all results into HBase ───────────────────────────────────
+    # Restart HBase before writing — after 6 heavy Spark jobs the master
+    # connection pool can become stale and getTableNames() fails with IOError.
+
+    - name: Restart HBase to clear stale master connections before write
+      community.docker.docker_compose_v2:
+        project_src: "{{ project }}"
+        files: ["{{ compose_file }}"]
+        services: [hbase]
+        state: restarted
+
+    - name: Wait for HBase Thrift to accept connections
+      wait_for:
+        port: 9090
+        host: localhost
+        timeout: 120
+        delay: 15   # give HBase master time to fully initialise
+
+    - name: "[7/7] Write analytics results to HBase"
+      shell: "{{ submit }} /app/07_hbase_storage.py"
+      args:
+        chdir: "{{ project }}"
+      async: 1800
+      poll: 15
+
+    - name: Verify HBase tables were populated
+      shell: |
+        docker exec hbase hbase shell 2>/dev/null <<< "
+        count 'ip_threat_summary'
+        count 'threat_timeline'
+        count 'threat_volume'
+        " 2>/dev/null | grep -E "^\d+ row"
+      register: hbase_counts
+      ignore_errors: true
+
+    - name: Show HBase row counts
+      debug:
+        msg: "{{ hbase_counts.stdout_lines | default(['(could not read counts — check: docker exec hbase hbase shell)']) }}"
+
+    - name: Ensure spark-streaming is still running after batch (restart if OOM-killed)
+      community.docker.docker_compose_v2:
+        project_src: "{{ project }}"
+        files: ["{{ compose_file }}"]
+        services: [spark-streaming]
+        state: present
+
+    - name: Wait 15s for streaming to reconnect to Kafka
+      pause:
+        seconds: 15
+
+    - name: Confirm spark-streaming is running
+      shell: docker inspect --format='{{ "{{" }}.State.Status{{ "}}" }}' spark-streaming
+      register: stream_final
+      failed_when: stream_final.stdout != "running"
+
+    - name: Batch pipeline complete
+      debug:
+        msg:
+          - "Batch pipeline finished. HBase is now populated."
+          - "spark-streaming is {{ stream_final.stdout }} — speed layer is active."
+          - "Grafana panels: top-ips, threat-volume, threat-timeline should now show data."

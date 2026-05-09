@@ -1,6 +1,6 @@
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
-    col, count, window, when, lit
+    col, count, first, window, when, lit
 )
 
 spark = SparkSession.builder \
@@ -62,7 +62,7 @@ top_brute_force_ips = brute_force_1min \
     .groupBy("source_ip") \
     .agg(
         count("*").alias("nb_episodes"),
-        col("severite")
+        first(col("severite")).alias("severite")
     ) \
     .orderBy(col("nb_episodes").desc()) \
     .limit(20)
