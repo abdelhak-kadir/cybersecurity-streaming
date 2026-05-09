@@ -1,86 +1,102 @@
 # Real-Time Cybersecurity Threat Detection — Lambda Architecture
 
-A production-grade big data pipeline that ingests network security logs, detects threats in real time using Spark Structured Streaming, builds batch analytics with HDFS + HBase, trains an ML threat classifier, and serves everything through a FastAPI backend with a live Grafana dashboard.
+A production-grade big data pipeline that ingests network security logs, detects threats in real time via Spark Structured Streaming, builds historical analytics with HDFS + HBase, trains an ML threat classifier, and serves everything through a FastAPI backend with a live Grafana dashboard and automated email alerting.
 
-> Dataset: [Cybersecurity Threat Detection Logs](https://www.kaggle.com/datasets/teamincribo/cyber-security-attacks) — 6 million network log events (834 MB CSV).
+> **Live demo:** [https://grafana.project-demo.tech](https://grafana.project-demo.tech)  
+> **Source code:** [github.com/oubellaismail/cybersecurity-streaming](https://github.com/oubellaismail/cybersecurity-streaming)  
+> **Dataset:** [Cybersecurity Threat Detection Logs](https://www.kaggle.com/datasets/aryan208/cybersecurity-threat-detection-logs) — 6.18M network log events (874 MB CSV)
 
 ---
 
 ## Architecture
 
 ```
-                        ┌─────────────────────────────────────────────┐
-                        │              Kafka Producer                  │
-                        │         (replays CSV at 10 events/s)        │
-                        └──────────────────┬──────────────────────────┘
-                                           │
-                                           ▼
-                              ┌────────────────────────┐
-                              │   Apache Kafka :9092    │
-                              │  topic: cybersecurity-  │
-                              │         logs            │
-                              └────────────┬───────────┘
-                                           │
-                     ┌─────────────────────┴─────────────────────┐
-                     │                                           │
-                     ▼                                           ▼
-        ┌────────────────────────┐              ┌────────────────────────────┐
-        │     SPEED LAYER        │              │       BATCH LAYER          │
-        │  Spark Structured      │              │  Spark Batch (scheduled)   │
-        │  Streaming             │              │                            │
-        │  • Brute-force detect  │              │  01. CSV → HDFS (Parquet)  │
-        │  • Port scan detect    │              │  02. Top IPs by score      │
-        │  • Attack signatures   │              │  03. Threat volume stats   │
-        │  • Multi-step attack   │              │  04. Attack evolution      │
-        │    correlation         │              │  05. Brute-force patterns  │
-        │  • Adaptive IP scoring │              │  06. SQLi / XSS detection  │
-        └──────────┬─────────────┘              │  07. Write results → HBase │
-                   │                            │  08. ML training (RF + LR) │
-                   ▼                            └────────────┬───────────────┘
-        ┌────────────────────────┐                           │
-        │  Cassandra (speed DB)  │                           ▼
-        │  • realtime_threats    │              ┌────────────────────────────┐
-        │  • ip_threat_summary   │              │  HDFS + HBase (batch DB)   │
-        │  • correlated_attacks  │              │  • ip_reputation           │
-        └──────────┬─────────────┘              │  • threat_timeline         │
-                   │                            │  • attack_patterns         │
-                   └──────────────┬─────────────┘  • ML model (HDFS)        │
-                                  │             └────────────┬───────────────┘
-                                  ▼                          │
-                     ┌────────────────────────┐              │
-                     │     SERVING LAYER      │◄─────────────┘
-                     │   FastAPI :8000        │
-                     │  /api/threats/live     │
-                     │  /api/stats/top-ips    │
-                     │  /api/ml/summary       │
-                     │  /api/scoring/adaptive │
-                     └──────────┬─────────────┘
-                                │
-                                ▼
-                     ┌────────────────────────┐
-                     │   Grafana :3000        │
-                     │   (Infinity plugin)    │
-                     │   Live dashboard       │
-                     └────────────────────────┘
+                    ┌─────────────────────────────────────┐
+                    │  Dataset — 6.18M log events, 874 MB  │
+                    └──────────────┬──────────────────────┘
+                           ┌───────┴────────┐
+                           │                │
+                           ▼                ▼
+                 ┌──────────────────┐  ┌───────────────────┐
+                 │  Kafka Producer  │  │   HDFS (Parquet)  │
+                 │   10 events/s    │  │  year/month/day   │
+                 └────────┬─────────┘  └────────┬──────────┘
+                          │                     │
+                          ▼                     ▼
+         ╔════════════════════════╗  ╔══════════════════════════════╗
+         ║      SPEED LAYER       ║  ║         BATCH LAYER          ║
+         ║                        ║  ║                              ║
+         ║  Kafka (3 partitions)  ║  ║  Spark Batch — 7 scripts     ║
+         ║          │             ║  ║  + ML: Random Forest 97.1%   ║
+         ║          ▼             ║  ║          │                   ║
+         ║  Spark Structured      ║  ║          ▼                   ║
+         ║  Streaming             ║  ║  HBase (batch views)         ║
+         ║  • Brute-force         ║  ║  • ip_reputation             ║
+         ║  • Attack signatures   ║  ║  • attack_patterns           ║
+         ║  • Volume anomaly      ║  ║  • threat_timeline           ║
+         ║  • Port scan           ║  ║  • ML model (HDFS)           ║
+         ║  • APT kill-chain      ║  ╚══════════════╤═══════════════╝
+         ║          │             ║                 │
+         ║          ▼             ║                 │
+         ║  Cassandra (24h TTL)   ║                 │
+         ║  • realtime_threats    ║                 │
+         ║  • ip_threat_summary   ║                 │
+         ║  • correlated_attacks  ║                 │
+         ╚══════════╤═════════════╝                 │
+                    └──────────────────┬────────────┘
+                                       │
+                                       ▼
+              ╔════════════════════════════════════════╗
+              ║            SERVING LAYER               ║
+              ║   FastAPI :8000  —  14 REST endpoints  ║
+              ║   /api/ip/{ip}  /api/threats/live      ║
+              ║   /api/scoring/adaptive  /api/ml/*     ║
+              ║   /metrics  (Prometheus format)        ║
+              ╚══════════════╤═════════════════════════╝
+                             │
+              ┌──────────────┴──────────────┐
+              ▼                             ▼
+ ┌────────────────────────┐   ┌─────────────────────────────────┐
+ │   Prometheus :9090     │   │   Grafana :3000                 │
+ │   scrapes /metrics     ├──▶│   Infinity plugin  (dashboard)  │
+ │   every 15 seconds     │   │   Unified Alerting (4 rules)    │
+ └────────────────────────┘   └──────────────────┬──────────────┘
+                                                 │ threshold breach
+                                                 ▼
+                               ┌──────────────────────────────────┐
+                               │  SendGrid SMTP :2525             │
+                               │  From: alert@project-demo.tech   │
+                               └──────────────────┬───────────────┘
+                                                  ▼
+                                         Email notification
+
+──────────────────── PUBLIC ACCESS (cloud) ────────────────────────
+  Browser ──▶ Caddy :443  (HTTPS · automatic Let's Encrypt cert)
+               ├── grafana.project-demo.tech ──▶ Grafana :3000
+               └── api.project-demo.tech    ──▶ FastAPI :8000
+                                                (EXPOSE_API=true)
 ```
 
 ---
 
 ## Tech Stack
 
-| Layer | Technology | Role |
-|-------|-----------|------|
-| Ingestion | Apache Kafka 7.4.0 + Zookeeper | Event streaming backbone |
-| Speed processing | Apache Spark 3.3.0 Structured Streaming | Real-time threat detection |
-| Batch processing | Apache Spark 3.3.0 (batch mode) | Historical analytics & ML |
-| Speed storage | Apache Cassandra 4.1 | Low-latency threat queries |
-| Batch storage | Apache HBase 2.1 + HDFS 3.2.1 | Aggregated analytics |
-| ML | PySpark MLlib — Random Forest + Logistic Regression | Threat classification |
-| Serving | FastAPI + Python 3.9 | REST API over both stores |
-| Visualization | Grafana 10.4.2 + Infinity datasource | Live dashboard |
-| Reverse proxy | Caddy 2 | Automatic HTTPS via Let's Encrypt |
-| Infrastructure | Terraform + DigitalOcean | Cloud provisioning |
-| Configuration | Ansible | Droplet setup & deployment |
+| Layer | Technology | Version | Role |
+|-------|-----------|---------|------|
+| Ingestion | Apache Kafka + Zookeeper | 7.4.0 (CP) | Durable event log, 3-partition topic |
+| Speed processing | Spark Structured Streaming | 3.3.0 | Real-time threat detection (5 rules) |
+| Batch processing | Spark Batch | 3.3.0 | Historical analytics + ML training |
+| Speed storage | Apache Cassandra | 4.1 | High-write, native 24h TTL |
+| Batch storage | HBase + HDFS | 2.1 / 3.2.1 | Pre-computed batch views |
+| ML | PySpark MLlib — Random Forest | 3.3.0 | 97.1% accuracy on 6.18M records |
+| Serving | FastAPI + Python | 0.110 / 3.9 | 14-endpoint REST API, Lambda merge |
+| Metrics | Prometheus | 2.51.0 | Pull-based scraping of `/metrics` every 15s |
+| Dashboard & Alerting | Grafana + Infinity plugin | 10.4.2 | Live panels + 4 email alert rules |
+| Email delivery | SendGrid SMTP | — | Authenticated sender `alert@project-demo.tech` |
+| Reverse proxy | Caddy 2 | 2-alpine | Automatic HTTPS via Let's Encrypt |
+| Infrastructure | Terraform + DigitalOcean | 1.x | 3-droplet VPC cluster provisioning |
+| Configuration | Ansible | 2.x | Idempotent deployment over SSH |
+| Containerisation | Docker Compose | v2 | Multi-profile local + per-droplet cloud |
 
 ---
 
@@ -89,58 +105,60 @@ A production-grade big data pipeline that ingests network security logs, detects
 ```
 cybersecurity-streaming/
 ├── streaming/
-│   ├── kafka_producer.py        # Replays CSV into Kafka
-│   └── spark_streaming.py       # 6 parallel streaming queries → Cassandra
-├── batch/
-│   └── scripts/
-│       ├── 01_load_hdfs.py      # CSV → HDFS Parquet (partitioned by date)
-│       ├── 02_top_ips.py        # Top IPs by threat score
-│       ├── 03_Threat_Volume_Analysis.py
-│       ├── 03_port_scans.py
-│       ├── 04_Attack_Evolution.py
-│       ├── 05_brute_force.py
-│       ├── 06_SQLi_XSS.py
-│       └── 07_hbase_storage.py  # Write all results → HBase tables
-├── ml/
-│   └── scripts/
-│       ├── 08_ml_threat_classification.py  # Train RF + LR, export ml_summary.json
-│       └── 09_ml_predict.py
+│   ├── kafka_producer.py           # Replays CSV into Kafka (10 ev/s)
+│   └── spark_streaming.py          # 5 detection rules + correlation → Cassandra
+├── batch/scripts/
+│   ├── 01_load_hdfs.py             # CSV → HDFS Parquet (partitioned by date)
+│   ├── 02_top_ips.py               # Top IPs by threat score → HBase
+│   ├── 03_Threat_Volume_Analysis.py
+│   ├── 03_port_scans.py
+│   ├── 04_Attack_Evolution.py
+│   ├── 05_brute_force.py
+│   ├── 06_SQLi_XSS.py
+│   └── 07_hbase_storage.py         # Persist all views → HBase tables
+├── ml/scripts/
+│   ├── 08_ml_threat_classification.py  # Train Random Forest, export ml_summary.json
+│   └── 09_ml_predict.py
 ├── serving/
-│   ├── main.py                  # FastAPI app — queries Cassandra + HBase + JSON
-│   ├── db/
-│   │   ├── cassandra_client.py
-│   │   └── hbase_client.py
+│   ├── main.py                     # FastAPI — 14 endpoints + /metrics
+│   ├── requirements.txt            # includes prometheus-client
+│   ├── db/cassandra_client.py
+│   ├── db/hbase_client.py
 │   └── Dockerfile
+├── prometheus/
+│   └── prometheus.yml              # Scrape config: serving:8000/metrics, 15s interval
 ├── grafana/
-│   ├── provisioning/datasources/infinity.yml
+│   ├── provisioning/
+│   │   ├── datasources/
+│   │   │   ├── infinity.yml        # Infinity REST datasource → FastAPI
+│   │   │   └── prometheus.yml      # Prometheus datasource (uid: prometheus)
+│   │   └── alerting/
+│   │       ├── rules.yml           # 4 Unified Alerting rules (A→B→C pipeline)
+│   │       ├── contact-points.yml  # SendGrid email contact point
+│   │       └── notification-policies.yml
 │   └── dashboards/cybersecurity.json
-├── docker/
-│   ├── spark/                   # Custom Spark image with Python deps
-│   ├── kafka-setup/             # Topic creation script
-│   ├── cassandra-init.cql       # Keyspace + table DDL
-│   └── cassandra-reset.cql
 ├── caddy/
-│   └── Caddyfile.j2             # Ansible-rendered Caddy config (HTTPS)
+│   └── Caddyfile.j2                # Ansible-rendered HTTPS config
 ├── terraform/
-│   ├── main.tf                  # VPC, 3 droplets, firewalls, DNS
+│   ├── main.tf                     # VPC, 3 droplets, firewalls, DNS
 │   ├── variables.tf
 │   └── outputs.tf
 ├── ansible/
-│   ├── generate_inventory.sh    # Terraform outputs → inventory.ini
+│   ├── generate_inventory.sh       # terraform output → inventory.ini
 │   └── playbooks/
 │       ├── install_docker.yml
-│       ├── deploy_infra.yml     # Droplet 1: Kafka + Cassandra
-│       ├── deploy_compute.yml   # Droplet 2: Spark + HBase + HDFS
-│       ├── deploy_serve.yml     # Droplet 3: FastAPI + Grafana + Caddy
-│       ├── deploy_batch.yml     # Run full batch pipeline
-│       ├── verify.yml           # Health checks across all droplets
-│       └── sync_ml_summary.yml  # Push updated ML metrics to serve
-├── docker-compose.yml           # Local development (all-in-one)
-├── docker-compose.infra.yml     # Droplet 1 services
-├── docker-compose.compute.yml   # Droplet 2 services
-├── docker-compose.serve.yml     # Droplet 3 services
-├── .env.example                 # Environment variable template
-└── Makefile                     # All commands — local and cloud
+│       ├── deploy_infra.yml        # Droplet 1: Kafka + Cassandra
+│       ├── deploy_compute.yml      # Droplet 2: Spark + HBase + HDFS
+│       ├── deploy_serve.yml        # Droplet 3: FastAPI + Prometheus + Grafana + Caddy
+│       ├── deploy_batch.yml        # Run full batch pipeline
+│       ├── verify.yml              # Health checks across all droplets
+│       └── sync_ml_summary.yml
+├── docker-compose.yml              # Local dev (profiles: batch / stream / serve / test)
+├── docker-compose.infra.yml        # Droplet 1 services
+├── docker-compose.compute.yml      # Droplet 2 services
+├── docker-compose.serve.yml        # Droplet 3 services
+├── .env.example
+└── Makefile                        # All commands — local and cloud
 ```
 
 ---
@@ -151,85 +169,76 @@ cybersecurity-streaming/
 
 - Docker Desktop (≥ 4.x) with at least **10 GB RAM** allocated
 - `make`
-- The dataset CSV in `data/cybersecurity_threat_detection_logs.csv`  
-  _(Download from [Kaggle](https://www.kaggle.com/datasets/teamincribo/cyber-security-attacks))_
+- Dataset CSV in `data/cybersecurity_threat_detection_logs.csv`  
+  _(Download from [Kaggle](https://www.kaggle.com/datasets/aryan208/cybersecurity-threat-detection-logs))_
 
 ### Setup
 
 ```bash
-git clone <repo>
+git clone https://github.com/oubellaismail/cybersecurity-streaming
 cd cybersecurity-streaming
-
-# Copy env template and adjust if needed (defaults work for local)
 cp .env.example .env
-
-# Place the CSV
 mkdir -p data
-# → put cybersecurity_threat_detection_logs.csv in data/
+# → place cybersecurity_threat_detection_logs.csv in data/
 ```
 
-### Start the full stack
+### Start the stack
 
 ```bash
-# Start all services (Kafka, Cassandra, HBase, HDFS, Spark, FastAPI, Grafana)
-make all
+make all          # Start full stack (batch + stream + serve profiles)
 
-# Or start layers individually:
-make batch    # batch stack only (HDFS + HBase + Spark)
-make stream   # streaming stack only (Kafka + Cassandra + Spark streaming)
+# Or by layer:
+make batch        # HDFS + HBase + Spark batch
+make stream       # Kafka + Cassandra + Spark streaming
 ```
 
 ### Run the batch pipeline
 
-After the stack is up and the producer has been sending data for a few minutes:
-
 ```bash
-make batch-load       # Load CSV into HDFS (takes ~10 min for full dataset)
-make batch-analytics  # Run analytics scripts (02–06)
-make batch-hbase      # Write results to HBase (07)
+make batch-load       # CSV → HDFS Parquet (~10 min for 6.18M rows)
+make batch-analytics  # Scripts 02–06 (analytics)
+make batch-hbase      # Script 07 — write results to HBase
 make batch-all        # All of the above in sequence
 ```
 
 ### Run ML training
 
 ```bash
-make ml-train   # Train Random Forest + Logistic Regression (~20 min)
-make ml-predict # Run predictions on full dataset
+make ml-train    # Train Random Forest on 4.94M records (~12 min)
+make ml-predict  # Run predictions on held-out 1.24M records
 ```
 
-### Access
+### Local access
 
 | Service | URL | Credentials |
 |---------|-----|-------------|
 | Grafana | http://localhost:3000 | admin / admin |
 | FastAPI docs | http://localhost:8000/docs | — |
+| FastAPI metrics | http://localhost:8000/metrics | — |
 | Spark master UI | http://localhost:8080 | — |
 | HDFS namenode | http://localhost:9870 | — |
 
 ### Useful commands
 
 ```bash
-make status          # Show running containers
-make logs            # Tail all logs
-make shell-kafka     # Open Kafka shell
-make shell-cassandra # Open cqlsh
-make shell-spark     # Open Spark shell
-make down            # Stop everything
-make clean           # Stop and remove all volumes
+make status           # Show running containers
+make logs             # Tail all logs
+make shell-cassandra  # Open cqlsh
+make shell-kafka      # Open Kafka shell
+make serving-test     # Smoke-test all 14 API endpoints via curl
+make test             # Unit tests inside Docker
+make down             # Stop everything
+make clean            # Stop and remove all volumes
 ```
 
 ---
 
 ## Cloud Deployment (DigitalOcean — 3 Droplets)
 
-The full stack is split across 3 droplets connected via a private VPC. One command provisions everything from scratch.
-
-### Target architecture
-
 ```
-Droplet 1 "infra"    s-2vcpu-4gb  ($24/mo)   Kafka + Zookeeper + Cassandra
-Droplet 2 "compute"  s-4vcpu-8gb  ($48/mo)   Spark + HBase + HDFS + producer + streaming
-Droplet 3 "serve"    s-2vcpu-2gb  ($12/mo)   FastAPI + Grafana + Caddy (HTTPS)
+Droplet 1 "infra"    s-2vcpu-4gb  (~$24/mo)   Kafka + Zookeeper + Cassandra
+Droplet 2 "compute"  s-4vcpu-8gb  (~$48/mo)   Spark + HBase + HDFS + producer + streaming
+Droplet 3 "serve"    s-2vcpu-2gb  (~$12/mo)   FastAPI + Prometheus + Grafana + Caddy
 ```
 
 ### One-time prerequisites
@@ -247,18 +256,13 @@ ssh-keygen -t ed25519 -f ~/.ssh/do_cyber -C "cyber-cluster"
 # 4. Point your domain's nameservers at DigitalOcean
 #    ns1.digitalocean.com / ns2.digitalocean.com / ns3.digitalocean.com
 
-# 5. Fill in .env (copy from .env.example)
+# 5. Fill in .env
 cp .env.example .env
-# Edit .env — set at minimum:
-#   DIGITALOCEAN_TOKEN=dop_v1_...
-#   DOMAIN=your-domain.com
-#   GRAFANA_SUBDOMAIN=grafana.your-domain.com
-#   ACME_EMAIL=you@example.com
-#   ANSIBLE_SSH_KEY=~/.ssh/do_cyber
-#   TF_VAR_ssh_public_key_path=~/.ssh/do_cyber.pub
-#   TF_VAR_ssh_private_key_path=~/.ssh/do_cyber
+# Set at minimum:
+#   DIGITALOCEAN_TOKEN, DOMAIN, GRAFANA_SUBDOMAIN, ACME_EMAIL
+#   SENDGRID_API_KEY, ALERT_EMAIL
+#   TF_VAR_ssh_public_key_path / TF_VAR_ssh_private_key_path
 
-# 6. Initialize Terraform
 make tf-init
 ```
 
@@ -268,117 +272,74 @@ make tf-init
 make deploy-all
 ```
 
-This runs the full pipeline in order:
+| Step | What it does |
+|------|-------------|
+| `tf-apply` | Provision VPC, 3 droplets, firewalls |
+| `gen-inventory` | Write `ansible/inventory.ini` from Terraform outputs |
+| `ansible-install-docker` | Install Docker CE on all 3 droplets |
+| `ansible-deploy-infra` | Start Kafka, Cassandra, create topic + schema |
+| `ansible-deploy-compute` | Start HDFS, HBase, Spark, producer, streaming |
+| `ansible-deploy-serve` | Start FastAPI, Prometheus, Grafana, Caddy |
+| `ansible-deploy-batch` | Run full batch pipeline (CSV→HDFS→analytics→HBase) |
+| `ansible-verify` | Health checks across all droplets |
 
-| Step | Command | What it does |
-|------|---------|-------------|
-| 1 | `tf-apply` | Provision VPC, 3 droplets, firewalls, DNS records |
-| 2 | `gen-inventory` | Write `ansible/inventory.ini` from Terraform outputs |
-| 3 | `ansible-install-docker` | Install Docker CE on all 3 droplets |
-| 4 | `ansible-deploy-infra` | Start Kafka, Cassandra, create topic + schema |
-| 5 | `ansible-deploy-compute` | Start HDFS, HBase, Spark, producer, streaming |
-| 6 | `ansible-deploy-serve` | Start FastAPI, Grafana (with Infinity plugin), Caddy |
-| 7 | `ansible-deploy-batch` | Run full batch pipeline (CSV→HDFS→analytics→HBase) |
-| 8 | `ansible-verify` | Health checks across all droplets |
+Total: ~30–45 minutes (batch pipeline dominates).
 
-Total time: ~30–45 minutes (batch pipeline dominates).
-
-### Access after deployment
+### Cloud access
 
 ```
-Grafana:  https://grafana.your-domain.com   (admin / your password)
+Grafana:  https://grafana.your-domain.com   (admin / your GF_SECURITY_ADMIN_PASSWORD)
 FastAPI:  internal only by default
-          set EXPOSE_API=true in .env to expose at https://api.your-domain.com
+          set EXPOSE_API=true to expose at https://api.your-domain.com/docs
 ```
 
-HTTPS certificates are provisioned automatically by Caddy via Let's Encrypt on first request.
-
-### Individual deployment commands
+### Individual commands
 
 ```bash
-make tf-apply                # Provision cloud infrastructure only
+make tf-apply                # Provision infrastructure only
 make tf-destroy              # Tear down all cloud resources
-make tf-ips                  # Print droplet IPs from Terraform state
+make tf-ips                  # Print droplet IPs
 
-make ansible-deploy-infra    # Redeploy infra layer only
-make ansible-deploy-compute  # Redeploy compute layer only
-make ansible-deploy-serve    # Redeploy serve layer only
-make ansible-deploy-batch    # Re-run batch pipeline (idempotent)
+make ansible-deploy-infra    # Redeploy Droplet 1
+make ansible-deploy-compute  # Redeploy Droplet 2
+make ansible-deploy-serve    # Redeploy Droplet 3 (injecting secrets from .env)
+make ansible-deploy-batch    # Re-run batch pipeline
 make ansible-verify          # Health checks only
-
 make sync-ml-summary         # Push updated ml_summary.json from compute→serve
-                             # (run after retraining the ML model)
 ```
 
 ### Firewall rules
 
-| Droplet | Public ports | VPC-only ports |
-|---------|-------------|----------------|
+| Droplet | Public | VPC-only |
+|---------|--------|----------|
 | infra | 22 (SSH) | 9092 (Kafka) from compute; 9042 (Cassandra) from compute + serve |
 | compute | 22 (SSH) | 9090 (HBase Thrift) from serve |
 | serve | 22 (SSH), 80 (HTTP), 443 (HTTPS) | — |
 
 ---
 
-## Environment Variables
-
-All configuration lives in `.env` (copy from `.env.example`).
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `KAFKA_BROKER` | `kafka:29092` | Kafka bootstrap server |
-| `CASSANDRA_HOST` | `cassandra` | Cassandra hostname |
-| `CASSANDRA_PORT` | `9042` | Cassandra port |
-| `HBASE_HOST` | `hbase` | HBase Thrift host |
-| `HBASE_PORT` | `9090` | HBase Thrift port |
-| `SPARK_WORKER_MEMORY` | `2G` | Memory per Spark worker |
-| `SPARK_WORKER_CORES` | `2` | Cores per Spark worker |
-| `CSV_FILE` | `/data/cybersecurity_threat_detection_logs.csv` | Dataset path inside container |
-| `SEND_DELAY` | `0.1` | Seconds between Kafka messages (0.1 = 10/s) |
-| `MAX_MESSAGES` | `0` | 0 = loop forever |
-| `CHECKPOINT_BASE` | `/tmp/spark-checkpoints-v3` | Spark streaming checkpoint dir |
-| `ML_SUMMARY_PATH` | `/data/ml_summary.json` | ML metrics file for serving layer |
-| `GF_SECURITY_ADMIN_PASSWORD` | `admin` | Grafana admin password |
-| `DOMAIN` | — | Root domain (cloud deployment) |
-| `GRAFANA_SUBDOMAIN` | — | Full Grafana subdomain |
-| `ACME_EMAIL` | — | Let's Encrypt registration email |
-| `EXPOSE_API` | `false` | Expose FastAPI publicly via Caddy |
-| `DIGITALOCEAN_TOKEN` | — | DO API token (cloud deployment) |
-| `ANSIBLE_SSH_KEY` | `~/.ssh/do_cyber` | SSH key for Ansible |
-
----
-
 ## API Endpoints
 
-The FastAPI serving layer merges data from Cassandra (speed) and HBase (batch).
-
-### Health
+The FastAPI serving layer merges data from Cassandra (speed view) and HBase (batch view).
 
 ```
-GET /health
-→ {"status": "ok", "cassandra": true, "hbase": true}
-```
+GET /health                          → {"status":"ok","cassandra":true,"hbase":true}
+GET /metrics                         → Prometheus text format (6 cyber_* gauges)
 
-### Speed layer (Cassandra — real-time)
-
-```
+# Speed layer (Cassandra — real-time)
 GET /api/threats/live?minutes=60&limit=100
 GET /api/threats/correlated?minutes=60&limit=100
 GET /api/scoring/adaptive?minutes=60&limit=50
-```
+GET /api/ip/{ip}                     → Lambda merge: max(batch_score, realtime_score)
 
-### Batch layer (HBase — historical)
-
-```
+# Batch layer (HBase — historical)
 GET /api/stats/top-ips?limit=10
 GET /api/stats/threat-volume
 GET /api/stats/threat-timeline?days=30
 GET /api/stats/geo-threats
-```
+GET /api/stats/attack-patterns
 
-### ML layer
-
-```
+# ML layer
 GET /api/ml/summary
 GET /api/ml/metrics
 GET /api/ml/prediction-counts
@@ -389,50 +350,95 @@ Interactive docs: `http://localhost:8000/docs`
 
 ---
 
-## Grafana Dashboard
+## Grafana Dashboard & Alerting
 
-The dashboard (`grafana/dashboards/cybersecurity.json`) uses the **Infinity** datasource plugin to query the FastAPI REST API directly — no additional database connector needed.
+### Dashboard panels
 
-**Panels:**
+The main dashboard uses the **Infinity** datasource to query the FastAPI REST API directly.
 
-| Panel | Source | Data |
-|-------|--------|------|
-| System Health | `/health` | Cassandra + HBase connectivity |
-| Live Threat Feed | Speed layer | Last 60 min threats |
-| Top 10 Malicious IPs | Batch layer | IP reputation scores |
-| Attack Timeline | Batch layer | 30-day threat trend |
-| Threat Volume | Batch layer | Bytes by threat label |
-| Threat Origins Map | Batch layer | Geo-located threat IPs |
-| ML Model Status | ML layer | Training status + F1 score |
-| ML Metrics Table | ML layer | Random Forest vs Logistic Regression |
-| ML Prediction Distribution | ML layer | Benign / Suspicious / Malicious counts |
-| ML Feature Importance | ML layer | Top predictive features |
-| Correlated Multi-Step Attacks | Speed layer | Multi-stage attack chains |
-| Adaptive IP Risk Scores | Speed layer | Time-decayed risk scores per IP |
+| Panel | Data source |
+|-------|-------------|
+| Live Threat Feed | `/api/threats/live` |
+| Threat Origin Map | `/api/stats/geo-threats` |
+| Adaptive IP Risk Scores | `/api/scoring/adaptive` |
+| Top 10 Malicious IPs | `/api/stats/top-ips` |
+| Attack Patterns (SQLi/XSS/port-scan) | `/api/stats/attack-patterns` |
+| Threat Timeline (30 days) | `/api/stats/threat-timeline` |
+| Threat Volume by Label | `/api/stats/threat-volume` |
+| Multi-Step Correlations | `/api/threats/correlated` |
+| ML Model Summary | `/api/ml/summary` + `/api/ml/metrics` |
+
+### Alerting pipeline
+
+Grafana Unified Alerting evaluates 4 rules every 60 seconds against Prometheus data:
+
+| Rule | Condition | Fires after | Severity |
+|------|-----------|-------------|----------|
+| Critical Threat Detected | Any IP with score ≥ 90 active | 1 min | critical |
+| Threat Wave | > 100 active threats in 60 min | 5 min | warning |
+| APT Kill-Chain Detected | Max threat score reaches 100 | 1 min | critical |
+| Brute-Force Wave | > 50 brute-force alerts in 60 min | 2 min | warning |
+
+**Delivery:** SendGrid SMTP on port 2525 (port 587 is blocked by DigitalOcean; 2525 is SendGrid's designated alternative). The sender domain `project-demo.tech` is authenticated with SPF + DKIM records in DigitalOcean DNS.
 
 ---
 
-## ML Model Results
+## ML Results
 
-Trained on 4.8M events (80/20 split), 5-fold cross-validation:
+Trained on a stratified 80/20 split — 4.94M training records, 1.24M held-out test records.
 
-| Model | Accuracy | F1 Score | Precision |
-|-------|----------|----------|-----------|
-| Random Forest | 96.95% | 96.64% | 96.74% |
-| Logistic Regression | 95.57% | 94.77% | 95.45% |
+| Metric | Value |
+|--------|-------|
+| Accuracy | **97.11%** |
+| F1 score (macro) | 0.971 |
+| Precision (macro) | 0.972 |
+| Recall (macro) | 0.971 |
+| Baseline (majority class) | 34.00% |
 
-Top feature by importance: `path_length` (0.75), followed by `has_sqli` (0.11).
+Per-class breakdown:
+
+| Class | Precision | Recall | F1 |
+|-------|-----------|--------|----|
+| benign | 0.979 | 0.981 | 0.980 |
+| suspicious | 0.958 | 0.952 | 0.955 |
+| malicious | 0.979 | 0.981 | 0.980 |
+
+Top features by Gini importance: `is_blocked` > `has_tool_ua` > `bytes_log`.  
+Results available at runtime via `GET /api/ml/feature-importance`.
+
+---
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `KAFKA_BROKER` | `kafka:29092` | Kafka bootstrap server |
+| `CASSANDRA_HOST` | `cassandra` | Cassandra hostname |
+| `CASSANDRA_PORT` | `9042` | Cassandra port |
+| `HBASE_HOST` | `hbase` | HBase Thrift host |
+| `HBASE_PORT` | `9090` | HBase Thrift port |
+| `SPARK_WORKER_MEMORY` | `2G` | Memory per Spark worker |
+| `SPARK_WORKER_CORES` | `2` | Cores per Spark worker |
+| `CSV_FILE` | `/data/cybersecurity_threat_detection_logs.csv` | Dataset path |
+| `SEND_DELAY` | `0.1` | Seconds between Kafka messages (0.1 = 10/s) |
+| `MAX_MESSAGES` | `0` | 0 = loop forever |
+| `ML_SUMMARY_PATH` | `/data/ml_summary.json` | ML metrics file |
+| `GF_SECURITY_ADMIN_PASSWORD` | `admin` | Grafana admin password |
+| `SENDGRID_API_KEY` | — | SendGrid API key for alert emails |
+| `ALERT_EMAIL` | — | Recipient address for alert notifications |
+| `DOMAIN` | — | Root domain (cloud only) |
+| `GRAFANA_SUBDOMAIN` | — | Full Grafana subdomain |
+| `ACME_EMAIL` | — | Let's Encrypt registration email |
+| `EXPOSE_API` | `false` | Expose FastAPI publicly via Caddy |
+| `DIGITALOCEAN_TOKEN` | — | DO API token (cloud only) |
+| `ANSIBLE_SSH_KEY` | `~/.ssh/do_cyber` | SSH key for Ansible |
 
 ---
 
 ## Known Limitations
 
-- **Batch memory contention**: the batch pipeline and Spark streaming share the same 8 GB compute droplet. Batch jobs are capped at `--driver-memory 1g --executor-memory 1500m` to avoid OOM-killing the streaming job. Larger droplets remove this constraint.
-- **CSV timestamps**: the dataset's `timestamp` column contains historical dates. The streaming layer uses Kafka arrival time (`current_timestamp()`) for windowing — not CSV timestamps.
-- **Geo-location**: the geo-threats endpoint uses offline IP geolocation; accuracy varies for private/internal IPs.
-
----
-
-## License
-
-MIT
+- **No Kafka replication.** Topic created with `replication-factor=1`. A single broker failure causes data loss. Production requires RF ≥ 3.
+- **HBase Thrift API is deprecated.** `happybase` uses Thrift 1; future HBase upgrades may break compatibility.
+- **Static ML model.** Trained once on a fixed corpus; no concept drift detection or incremental retraining.
+- **ip-api.com rate limit.** 45 requests/min for unauthenticated callers; the geo-threats endpoint may return incomplete results under load.
+- **No API authentication.** The FastAPI layer has no auth or rate limiting — unsuitable for public exposure without a gateway.
