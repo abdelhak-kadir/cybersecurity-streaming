@@ -78,8 +78,8 @@ services:
     depends_on:
       - spark-master
     environment:
-      - SPARK_WORKER_MEMORY=2G
-      - SPARK_WORKER_CORES=2
+      - SPARK_WORKER_MEMORY=${SPARK_WORKER_MEMORY}
+      - SPARK_WORKER_CORES=${SPARK_WORKER_CORES}
     volumes:
       - ./data:/data
     command: bash -c "/opt/spark/sbin/start-worker.sh spark://spark-master:7077 && tail -f /opt/spark/logs/*"
@@ -92,8 +92,8 @@ services:
     depends_on:
       - spark-master
     environment:
-      - SPARK_WORKER_MEMORY=2G
-      - SPARK_WORKER_CORES=2
+      - SPARK_WORKER_MEMORY=${SPARK_WORKER_MEMORY}
+      - SPARK_WORKER_CORES=${SPARK_WORKER_CORES}
     volumes:
       - ./data:/data
     command: bash -c "/opt/spark/sbin/start-worker.sh spark://spark-master:7077 && tail -f /opt/spark/logs/*"
@@ -180,10 +180,10 @@ services:
     ports:
       - "9042:9042"
     environment:
-      - CASSANDRA_CLUSTER_NAME=CyberCluster
-      - CASSANDRA_DC=datacenter1
-      - HEAP_NEWSIZE=128M
-      - MAX_HEAP_SIZE=512M
+      - CASSANDRA_CLUSTER_NAME=${CASSANDRA_CLUSTER_NAME}
+      - CASSANDRA_DC=${CASSANDRA_DC}
+      - HEAP_NEWSIZE=${HEAP_NEWSIZE}
+      - MAX_HEAP_SIZE=${MAX_HEAP_SIZE}
     volumes:
       - cassandra-data:/var/lib/cassandra
     networks:
@@ -215,8 +215,8 @@ services:
     depends_on:
       - spark-master
     environment:
-      - SPARK_WORKER_MEMORY=2G
-      - SPARK_WORKER_CORES=2
+      - SPARK_WORKER_MEMORY=${SPARK_WORKER_MEMORY}
+      - SPARK_WORKER_CORES=${SPARK_WORKER_CORES}
     command: bash -c "/opt/spark/sbin/start-worker.sh spark://spark-master:7077 && tail -f /opt/spark/logs/*"
     networks:
       - cyber-net
@@ -231,10 +231,8 @@ services:
     volumes:
       - ./streaming:/app
       - ./data:/data
-    environment:
-      - CSV_FILE=/data/cybersecurity_threat_detection_logs.csv
-      - SEND_DELAY=0.01
-      - MAX_MESSAGES=0
+    env_file:
+      - .env
     working_dir: /app
     command: python3 -u kafka_producer.py
     networks:
@@ -255,12 +253,14 @@ services:
       - ./streaming:/app
       - ./data:/data
       - spark-checkpoints:/tmp/spark-checkpoints-v3
+    env_file:
+      - .env
     working_dir: /app
     command: >
       spark-submit
       --master spark://spark-master:7077
       --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.3.0,com.datastax.spark:spark-cassandra-connector_2.12:3.3.0
-      --conf spark.cassandra.connection.host=cassandra
+      --conf spark.cassandra.connection.host=${CASSANDRA_HOST}
       spark_streaming.py
     networks:
       - cyber-net
@@ -285,12 +285,8 @@ services:
         condition: service_started
     ports:
       - "8000:8000"
-    environment:
-      - CASSANDRA_HOST=cassandra
-      - CASSANDRA_PORT=9042
-      - HBASE_HOST=hbase
-      - HBASE_PORT=9090
-      - ML_SUMMARY_PATH=/data/ml_summary.json
+    env_file:
+      - .env
     volumes:
       - ./data:/data:ro
     networks:
@@ -309,7 +305,7 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GF_SECURITY_ADMIN_PASSWORD}
     command: >
       sh -lc "if [ ! -f /var/lib/grafana/plugins/yesoreyeram-infinity-datasource/plugin.json ];
       then grafana cli --pluginsDir /var/lib/grafana/plugins plugins install yesoreyeram-infinity-datasource;
