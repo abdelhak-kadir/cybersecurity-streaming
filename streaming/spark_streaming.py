@@ -81,7 +81,8 @@ logs = raw_stream \
     .selectExpr("CAST(value AS STRING) as json_str") \
     .select(from_json(col("json_str"), log_schema).alias("d")) \
     .select("d.*") \
-    .withWatermark("timestamp", "30 seconds")
+    .withColumn("arrival_time", current_timestamp()) \
+    .withWatermark("arrival_time", "30 seconds")
 
 
 # ── Helper: write a stream to Cassandra ───────────────────────────────────
@@ -237,7 +238,7 @@ def make_batch_writer(query_name: str):
 brute_force = logs \
     .filter(col("action") == "blocked") \
     .groupBy(
-        window(col("timestamp"), "1 minute"),
+        window(col("arrival_time"), "1 minute"),
         col("source_ip")
     ) \
     .agg(count("*").alias("blocked_count")) \
@@ -292,7 +293,7 @@ print("Detection 2 started: attack signatures")
 # Rule: same IP transfers more than 10 MB in any 10-second window
 volume_anomaly = logs \
     .groupBy(
-        window(col("timestamp"), "10 seconds"),
+        window(col("arrival_time"), "10 seconds"),
         col("source_ip")
     ) \
     .agg(spark_sum("bytes_transferred").alias("total_bytes")) \
@@ -328,7 +329,7 @@ scan_filter = (
 port_scan = logs \
     .filter(scan_filter) \
     .groupBy(
-        window(col("timestamp"), "1 minute"),
+        window(col("arrival_time"), "1 minute"),
         col("source_ip")
     ) \
     .agg(count("*").alias("probe_count")) \
