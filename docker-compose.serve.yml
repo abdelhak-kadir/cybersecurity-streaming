@@ -39,6 +39,22 @@ services:
       retries: 5
       start_period: 20s
 
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: prometheus
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=15d"
+    depends_on:
+      serving:
+        condition: service_healthy
+    networks:
+      - cyber-net
+    restart: unless-stopped
+
   grafana:
     image: grafana/grafana:10.4.2
     container_name: grafana
@@ -48,9 +64,17 @@ services:
       - GF_SERVER_ROOT_URL=https://GRAFANA_SUBDOMAIN_PLACEHOLDER
       - GF_SERVER_DOMAIN=GRAFANA_SUBDOMAIN_PLACEHOLDER
       - GF_SECURITY_ALLOW_EMBEDDING=true
-      # GF_INSTALL_PLUGINS is the official way — Grafana installs on every start
-      # if not already present in the grafana-data volume.
       - GF_INSTALL_PLUGINS=yesoreyeram-infinity-datasource
+      # ── Unified Alerting ──────────────────────────────────────
+      - GF_ALERTING_ENABLED=false          # disable legacy alerting
+      - GF_UNIFIED_ALERTING_ENABLED=true
+      # ── SendGrid SMTP ─────────────────────────────────────────
+      - GF_SMTP_ENABLED=true
+      - GF_SMTP_HOST=smtp.sendgrid.net:2525
+      - GF_SMTP_USER=apikey
+      - GF_SMTP_PASSWORD=SENDGRID_API_KEY_PLACEHOLDER
+      - GF_SMTP_FROM_ADDRESS=alert@project-demo.tech
+      - GF_SMTP_FROM_NAME=CyberSecurity Alerts
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning
       - ./grafana/dashboards:/var/lib/grafana/dashboards
@@ -58,6 +82,8 @@ services:
     depends_on:
       serving:
         condition: service_healthy
+      prometheus:
+        condition: service_started
     networks:
       - cyber-net
 
@@ -84,6 +110,7 @@ volumes:
   grafana-data: {}
   caddy-data: {}
   caddy-config: {}
+  prometheus-data: {}
 
 networks:
   cyber-net:

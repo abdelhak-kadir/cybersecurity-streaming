@@ -10,6 +10,9 @@
     acme_email:        "{{ lookup('env', 'ACME_EMAIL') }}"
     expose_api:        "{{ lookup('env', 'EXPOSE_API') | default('false') }}"
     gf_password:       "{{ lookup('env', 'GF_SECURITY_ADMIN_PASSWORD') | default('admin') }}"
+    # ── SendGrid / alerting ───────────────────────────────────────────────────
+    alert_email:         "{{ lookup('env', 'ALERT_EMAIL') | default('') }}"
+    sendgrid_api_key:    "{{ lookup('env', 'SENDGRID_API_KEY') }}"
 
   tasks:
 
@@ -76,6 +79,25 @@
         regexp: "GF_PASSWORD_PLACEHOLDER"
         replace: "{{ gf_password }}"
 
+    - name: Inject SendGrid API key
+      replace:
+        path: "{{ project }}/{{ compose_file }}"
+        regexp: "SENDGRID_API_KEY_PLACEHOLDER"
+        replace: "{{ sendgrid_api_key }}"
+
+    - name: Inject alert recipient email into contact-points provisioning
+      replace:
+        path: "{{ project }}/grafana/provisioning/alerting/contact-points.yml"
+        regexp: "ALERT_EMAIL_PLACEHOLDER"
+        replace: "{{ alert_email }}"
+
+    # ── Sync Prometheus config ────────────────────────────────────────────────
+
+    - name: Sync Prometheus config
+      synchronize:
+        src: "{{ playbook_dir }}/../../prometheus/"
+        dest: "{{ project }}/prometheus/"
+
     # ── Start services ────────────────────────────────────────────────────────
 
     - name: Build and start FastAPI serving container
@@ -93,6 +115,13 @@
       until: serving_health.stdout == "healthy"
       retries: 24
       delay: 5
+
+    - name: Start Prometheus
+      community.docker.docker_compose_v2:
+        project_src: "{{ project }}"
+        files: ["{{ compose_file }}"]
+        services: [prometheus]
+        state: present
 
     - name: Start Grafana
       community.docker.docker_compose_v2:

@@ -1,0 +1,184 @@
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: cybersecurity-alerts
+    folder: Cybersecurity
+    interval: 1m
+    rules:
+
+      - uid: cyber-critical-threat
+        title: "Critical Threat Detected"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: cyber_threats_critical
+              intervalMs: 60000
+              maxDataPoints: 1
+          - refId: B
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          - refId: C
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: math
+              expression: "$B > 0"
+        noDataState: OK
+        execErrState: Error
+        for: 1m
+        annotations:
+          summary: "One or more IPs have threat score >= 90"
+          description: "Active critical threats detected. Check /api/threats/live?min_score=90"
+        labels:
+          severity: critical
+
+      - uid: cyber-threat-wave
+        title: "Threat Wave — High Active Threat Count"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: cyber_threats_active
+              intervalMs: 60000
+              maxDataPoints: 1
+          - refId: B
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          - refId: C
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: math
+              expression: "$B > 100"
+        noDataState: OK
+        execErrState: Error
+        for: 5m
+        annotations:
+          summary: "More than 100 active threats in the last 60 minutes"
+          description: "A coordinated attack may be underway."
+        labels:
+          severity: warning
+
+      - uid: cyber-apt-detected
+        title: "APT Kill-Chain Detected (score 100)"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: cyber_max_threat_score
+              intervalMs: 60000
+              maxDataPoints: 1
+          - refId: B
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          - refId: C
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: math
+              expression: "$B > 99"
+        noDataState: OK
+        execErrState: Error
+        for: 1m
+        annotations:
+          summary: "Multi-step APT kill-chain correlation triggered (score 100)"
+          description: "A port-scan followed by exploitation was correlated. Check /api/threats/correlated"
+        labels:
+          severity: critical
+
+      - uid: cyber-brute-force-wave
+        title: "Brute-Force Wave Detected"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: cyber_brute_force_active
+              intervalMs: 60000
+              maxDataPoints: 1
+          - refId: B
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          - refId: C
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: math
+              expression: "$B > 50"
+        noDataState: OK
+        execErrState: Error
+        for: 2m
+        annotations:
+          summary: "More than 50 brute-force alerts in the last 60 minutes"
+          description: "Multiple IPs may be running credential-stuffing attacks."
+        labels:
+          severity: warning

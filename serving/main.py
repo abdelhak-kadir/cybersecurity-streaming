@@ -7,7 +7,9 @@ import time as _time
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import Response
 import requests as _requests
+from prometheus_client import Gauge, generate_latest, CONTENT_TYPE_LATEST, REGISTRY
 
 from db.cassandra_client import CassandraClient
 from db.hbase_client import HBaseClient
@@ -116,6 +118,35 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="CyberSecurity Serving Layer", version="1.0.0", lifespan=lifespan)
+
+# ── Prometheus metrics ────────────────────────────────────────────────────────
+_g_active      = Gauge("cyber_threats_active",       "Threats seen in the last 60 minutes")
+_g_high_score  = Gauge("cyber_threats_high_score",   "Active threats with score >= 80")
+_g_critical    = Gauge("cyber_threats_critical",     "Active threats with score >= 90")
+_g_max_score   = Gauge("cyber_max_threat_score",     "Highest threat score currently active")
+_g_brute       = Gauge("cyber_brute_force_active",   "Brute-force alerts in the last 60 minutes")
+_g_injection   = Gauge("cyber_injection_active",     "SQLi / XSS alerts in the last 60 minutes")
+
+
+@app.get("/metrics", include_in_schema=False)
+def metrics():
+    """Prometheus scrape endpoint — queries Cassandra on every call."""
+    if cassandra:
+        rows = cassandra.get_recent_threats(minutes=60, limit=5000)
+        scores = [r.threat_score or 0 for r in rows]
+        _g_active.set(len(rows))
+        _g_high_score.set(sum(1 for s in scores if s >= 80))
+        _g_critical.set(sum(1 for s in scores if s >= 90))
+        _g_max_score.set(max(scores, default=0))
+        _g_brute.set(sum(1 for r in rows if r.attack_type == "brute_force"))
+        _g_injection.set(sum(
+            1 for r in rows
+            if r.attack_type in ("attack-signature", "SQLi", "XSS")
+        ))
+    else:
+        for g in (_g_active, _g_high_score, _g_critical, _g_max_score, _g_brute, _g_injection):
+            g.set(0)
+    return Response(generate_latest(REGISTRY), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.get("/health", response_model=HealthResponse)
