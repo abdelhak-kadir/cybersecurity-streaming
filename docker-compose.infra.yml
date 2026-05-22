@@ -64,7 +64,7 @@ services:
       - cyber-net
 
   cassandra:
-    image: cassandra:4.1
+    image: cassandra:4.1.7
     container_name: cassandra
     ports:
       - "9042:9042"
@@ -85,7 +85,7 @@ services:
       start_period: 60s
 
   cassandra-init:
-    image: cassandra:4.1
+    image: cassandra:4.1.7
     container_name: cassandra-init
     depends_on:
       cassandra:

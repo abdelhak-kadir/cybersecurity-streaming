@@ -73,6 +73,10 @@ stats_by_threat.write.mode("overwrite") \
     .parquet("hdfs://namenode:9000/results/threat_volume/")
 print(" Stats par threat_label sauvegardées")
 
+stats_by_protocol.write.mode("overwrite") \
+    .parquet("hdfs://namenode:9000/results/attacks_by_protocol/")
+print(" Stats par protocole sauvegardées")
+
 transferts_anormaux.write.mode("overwrite") \
     .parquet("hdfs://namenode:9000/results/abnormal_transfers/")
 print(" Transferts anormaux sauvegardés")

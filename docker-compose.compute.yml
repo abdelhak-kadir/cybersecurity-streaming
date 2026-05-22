@@ -38,7 +38,7 @@ services:
       - cyber-net
 
   hbase:
-    image: dajobe/hbase
+    image: dajobe/hbase:latest
     container_name: hbase
     # hostname must remain hbase-docker — the image registers itself in ZK under this name
     hostname: hbase-docker

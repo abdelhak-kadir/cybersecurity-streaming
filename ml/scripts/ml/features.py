@@ -7,7 +7,7 @@ en features numériques exploitables par MLlib.
 
 from pyspark.sql import DataFrame
 from pyspark.sql.functions import (
-    col, length, lower, when, log1p, hour, dayofweek
+    col, coalesce, length, lit, lower, when, log1p, hour, dayofweek
 )
 
 # ── Patterns de détection ──────────────────────────────────────────────────
@@ -46,7 +46,7 @@ def build_features(df: DataFrame) -> DataFrame:
         .withColumn("day_of_week",  dayofweek(col("timestamp")))
 
         # ── Volumétriques ─────────────────────────────────────────────
-        .withColumn("bytes_log",    log1p(col("bytes_transferred").cast("double")))
+        .withColumn("bytes_log",    log1p(coalesce(col("bytes_transferred"), lit(0)).cast("double")))
         .withColumn("path_length",  length(col("request_path")).cast("double"))
         .withColumn("agent_length", length(col("user_agent")).cast("double"))
 

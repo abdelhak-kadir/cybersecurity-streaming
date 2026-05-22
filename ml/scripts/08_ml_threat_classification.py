@@ -58,12 +58,15 @@ df = ml.clean(ml.build_features(raw_df))
 print(f" Lignes après nettoyage : {df.count():,}")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 2. Split train / test
+# 2. Split train / test (stratified to preserve class distribution)
 # ══════════════════════════════════════════════════════════════════════════════
-train_df, test_df = df.randomSplit([0.8, 0.2], seed=42)
+fractions = df.select("threat_label").distinct().rdd.flatMap(lambda x: x).collect()
+fractions = {label: 0.8 for label in fractions}
+train_df = df.sampleBy("threat_label", fractions, seed=42)
+test_df = df.subtract(train_df)
 train_count = train_df.count()
 test_count = test_df.count()
-print(f"\n Split : {train_count:,} train / {test_count:,} test")
+print(f"\n Split (stratified) : {train_count:,} train / {test_count:,} test")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 3. Entraînement

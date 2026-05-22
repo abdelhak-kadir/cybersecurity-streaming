@@ -3,10 +3,12 @@ from datetime import datetime
 import ipaddress
 import json
 import os
+import threading
 import time as _time
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 import requests as _requests
 from prometheus_client import Gauge, generate_latest, CONTENT_TYPE_LATEST, REGISTRY
@@ -15,7 +17,9 @@ from db.cassandra_client import CassandraClient
 from db.hbase_client import HBaseClient
 from models.schemas import (
     AdaptiveScore,
+    AttackByProtocol,
     AttackPattern,
+    BlockRecommendation,
     CorrelatedAttack,
     GeoThreat,
     HealthResponse,
@@ -36,6 +40,7 @@ cassandra: Optional[CassandraClient] = None
 hbase: Optional[HBaseClient] = None
 _geo_cache: dict = {}
 _geo_cache_time: float = 0.0
+_geo_lock = threading.Lock()
 _GEO_TTL = 3600
 ML_SUMMARY_PATH = os.getenv("ML_SUMMARY_PATH", "/data/ml_summary.json")
 
@@ -69,32 +74,38 @@ def geolocate_batch(ips: list) -> dict:
     invalidation, not per-IP freshness.
     """
     global _geo_cache_time
-    now = _time.time()
-    # Invalidate the entire cache once per TTL period so entries don't
-    # grow stale indefinitely.
-    if now - _geo_cache_time > _GEO_TTL:
-        _geo_cache.clear()
-        _geo_cache_time = now
-    # Only request public IPs that are not already cached.
-    # ip-api.com returns status=fail for RFC1918/loopback ranges.
-    uncached = [ip for ip in ips if ip not in _geo_cache and not _is_private(ip)]
-    if uncached:
-        try:
-            response = _requests.post(
-                "http://ip-api.com/batch",
-                json=[
-                    {"query": ip, "fields": "query,lat,lon,country,city,status"}
-                    for ip in uncached
-                ],
-                timeout=5,
-            )
-            response.raise_for_status()
-            for entry in response.json():
-                if entry.get("status") == "success":
-                    _geo_cache[entry["query"]] = entry
-        except Exception as exc:
-            print(f"[geo] lookup failed: {exc}")
-    return {ip: _geo_cache.get(ip, {}) for ip in ips}
+    with _geo_lock:
+        now = _time.time()
+        # Invalidate the entire cache once per TTL period so entries don't
+        # grow stale indefinitely.
+        if now - _geo_cache_time > _GEO_TTL:
+            _geo_cache.clear()
+            _geo_cache_time = now
+        # Only request public IPs that are not already cached.
+        # ip-api.com returns status=fail for RFC1918/loopback ranges.
+        uncached = [ip for ip in ips if ip not in _geo_cache and not _is_private(ip)]
+        if uncached:
+            try:
+                _api_key = os.getenv("IP_API_KEY", "")
+                if _api_key:
+                    _geo_url = f"https://pro.ip-api.com/batch?key={_api_key}"
+                else:
+                    _geo_url = "http://ip-api.com/batch"
+                response = _requests.post(
+                    _geo_url,
+                    json=[
+                        {"query": ip, "fields": "query,lat,lon,country,city,status"}
+                        for ip in uncached
+                    ],
+                    timeout=5,
+                )
+                response.raise_for_status()
+                for entry in response.json():
+                    if entry.get("status") == "success":
+                        _geo_cache[entry["query"]] = entry
+            except Exception as exc:
+                print(f"[geo] lookup failed: {exc}")
+        return {ip: _geo_cache.get(ip, {}) for ip in ips}
 
 
 @asynccontextmanager
@@ -119,6 +130,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="CyberSecurity Serving Layer", version="1.0.0", lifespan=lifespan)
 
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "").split(",")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[o.strip() for o in CORS_ORIGINS if o.strip()] or ["*"],
+    allow_methods=["GET"],
+    allow_headers=["*"],
+)
+
 # ── Prometheus metrics ────────────────────────────────────────────────────────
 _g_active      = Gauge("cyber_threats_active",       "Threats seen in the last 60 minutes")
 _g_high_score  = Gauge("cyber_threats_high_score",   "Active threats with score >= 80")
@@ -132,7 +151,7 @@ _g_injection   = Gauge("cyber_injection_active",     "SQLi / XSS alerts in the l
 def metrics():
     """Prometheus scrape endpoint — queries Cassandra on every call."""
     if cassandra:
-        rows = cassandra.get_recent_threats(minutes=60, limit=5000)
+        rows = cassandra.get_recent_threats(minutes=10, limit=1000)
         scores = [r.threat_score or 0 for r in rows]
         _g_active.set(len(rows))
         _g_high_score.set(sum(1 for s in scores if s >= 80))
@@ -162,6 +181,10 @@ def health():
 
 @app.get("/api/ip/{ip}", response_model=IPReputationResponse)
 def get_ip_reputation(ip: str):
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid IP address")
     # Batch layer (HBase)
     batch = hbase.get_ip_reputation(ip) if hbase else None
     batch_score = float(batch.get("data:reputation_score", 0)) if batch else 0.0
@@ -189,13 +212,27 @@ def get_ip_reputation(ip: str):
         for r in recent_rows[:10]
     ]
 
+    merged_score = max(batch_score, realtime_score or 0)
+    all_types = batch_types | realtime_types
+
+    # Blocking recommendation based on merged score and attack context
+    if merged_score >= 90:
+        rec = {"action": "BLOCK", "reason": "Confirmed high-severity threat — immediate blocking recommended"}
+    elif merged_score >= 70:
+        rec = {"action": "RATE-LIMIT", "reason": "Suspicious activity detected — rate-limit and monitor closely"}
+    elif merged_score >= 40:
+        rec = {"action": "WATCH", "reason": "Low-severity indicators present — flag for review"}
+    else:
+        rec = {"action": "ALLOW", "reason": "No significant threat indicators"}
+
     return IPReputationResponse(
         ip=ip,
-        merged_reputation_score=max(batch_score, realtime_score or 0),
-        attack_types=sorted(batch_types | realtime_types),
+        merged_reputation_score=merged_score,
+        attack_types=sorted(all_types),
         total_realtime_alerts=alert_count,
         nb_batch_attacks=batch_attacks,
         last_seen=str(summary.last_seen) if summary and summary.last_seen else None,
+        recommendation=rec,
         recent_events=recent_events,
         batch_data=batch,
     )
@@ -321,8 +358,8 @@ def get_adaptive_scores(
 
     scores.sort(
         key=lambda item: (
-            item.adaptive_score,
             item.score_delta,
+            item.adaptive_score,
             item.last_seen or datetime.min,
         ),
         reverse=True,
@@ -401,6 +438,39 @@ def get_threat_volume(limit: int = Query(50, ge=1, le=200)):
         raise HTTPException(status_code=503, detail="HBase unavailable")
     rows = hbase.get_threat_volume(limit=limit)
     return [ThreatVolumePoint(threat_label=r["threat_label"], total_bytes=r["total_bytes"]) for r in rows]
+
+
+@app.get("/api/stats/attacks-by-protocol", response_model=list[AttackByProtocol])
+def get_attacks_by_protocol():
+    if not hbase:
+        raise HTTPException(status_code=503, detail="HBase unavailable")
+    rows = hbase.get_attacks_by_protocol()
+    return [
+        AttackByProtocol(
+            protocol=r["protocol"],
+            threat_label=r["threat_label"],
+            nb_events=r["nb_events"],
+            total_bytes=r["total_bytes"],
+        )
+        for r in rows
+    ]
+
+
+@app.get("/api/stats/attacks-by-protocol/pivoted")
+def get_attacks_by_protocol_pivoted():
+    """Return attack counts pivoted: one row per protocol with malicious/suspicious/benign columns."""
+    if not hbase:
+        raise HTTPException(status_code=503, detail="HBase unavailable")
+    rows = hbase.get_attacks_by_protocol()
+    pivot: dict[str, dict] = {}
+    for r in rows:
+        proto = r["protocol"]
+        if proto not in pivot:
+            pivot[proto] = {"protocol": proto, "malicious": 0, "suspicious": 0, "benign": 0}
+        label = r["threat_label"]
+        if label in ("malicious", "suspicious", "benign"):
+            pivot[proto][label] = r["nb_events"]
+    return list(pivot.values())
 
 
 @app.get("/api/ml/summary", response_model=MLSummary)

@@ -12,7 +12,11 @@ class HBaseClient:
         # ConnectionPool amortises Thrift connection overhead across requests.
         # Opens `size` connections eagerly — failure here is caught by the lifespan
         # try/except so the serving layer degrades gracefully rather than crashing.
-        self._pool = happybase.ConnectionPool(size=3, host=HBASE_HOST, port=HBASE_PORT)
+        self._pool = happybase.ConnectionPool(
+            size=3, host=HBASE_HOST, port=HBASE_PORT,
+            timeout=10000,       # 10s socket timeout (ms) — prevents indefinite hangs
+            transport="buffered",
+        )
 
     def close(self):
         pass  # ConnectionPool manages connection lifecycle
@@ -141,6 +145,24 @@ class HBaseClient:
                     rows = _read(conn, {})
         except Exception as exc:
             print(f"[hbase] threat timeline unavailable: {exc}")
+            return []
+        return rows
+
+    def get_attacks_by_protocol(self) -> list:
+        rows = []
+        try:
+            with self._pool.connection() as conn:
+                table = conn.table("attack_patterns")
+                for key, data in table.scan(row_prefix=b"PROTO_"):
+                    decoded = self._decode_row(data)
+                    rows.append({
+                        "protocol": self._value(decoded, "protocol", ""),
+                        "threat_label": self._value(decoded, "threat_label", ""),
+                        "nb_events": int(self._value(decoded, "nb_events")),
+                        "total_bytes": float(self._value(decoded, "total_bytes", "0")),
+                    })
+        except Exception as exc:
+            print(f"[hbase] attacks by protocol unavailable: {exc}")
             return []
         return rows
 

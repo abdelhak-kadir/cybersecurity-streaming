@@ -80,7 +80,7 @@ def print_comparison_table(metrics_rf: dict, metrics_lr: dict):
     print("=" * 65)
     print(f"{'Modèle':<30} {'Accuracy':>10} {'F1-Score':>10} {'Precision':>10}")
     print("-" * 65)
-    print(f"{'Random Forest (100 arbres)':<30} "
+    print(f"{'Random Forest (30 arbres)':<30} "
           f"{metrics_rf['accuracy']:>10.4f} "
           f"{metrics_rf['f1']:>10.4f} "
           f"{metrics_rf['precision']:>10.4f}")

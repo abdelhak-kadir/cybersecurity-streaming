@@ -71,7 +71,7 @@
 
     - name: Check HTTPS is reachable via Caddy
       uri:
-        url: "https://grafana.project-demo.tech"
+        url: "https://{{ grafana_domain | default('grafana.' + domain | default('project-demo.tech')) }}"
         status_code: [200, 302]
         validate_certs: false
       register: grafana_https
@@ -85,7 +85,7 @@
       debug:
         msg:
           - "Cluster is healthy!"
-          - "Grafana: https://grafana.project-demo.tech  (admin / admin)"
+          - "Grafana: https://{{ grafana_domain | default('grafana.' + domain | default('project-demo.tech')) }}"
           - "FastAPI: internal (Caddy proxy — set EXPOSE_API=true to expose publicly)"
 
 - name: Verify Kafka is producing on compute

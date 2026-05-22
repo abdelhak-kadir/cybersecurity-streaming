@@ -11,14 +11,21 @@ from cassandra.cluster import Cluster
 from cassandra.auth import PlainTextAuthProvider
 
 
+_cluster = None
+
+
 def wait_for_cassandra(host="cassandra", retries=10, delay=10):
+    global _cluster
     for i in range(retries):
         try:
-            cluster = Cluster([host])
-            session = cluster.connect()
+            _cluster = Cluster([host])
+            session = _cluster.connect()
             print(f"Connected to Cassandra at {host}")
             return session
         except Exception as e:
+            if _cluster:
+                _cluster.shutdown()
+                _cluster = None
             print(f"Cassandra not ready ({e}), retrying in {delay}s... ({i+1}/{retries})")
             time.sleep(delay)
     raise RuntimeError("Could not connect to Cassandra.")
@@ -27,6 +34,8 @@ def wait_for_cassandra(host="cassandra", retries=10, delay=10):
 def main():
     session = wait_for_cassandra()
 
+    # replication_factor=1 is acceptable for single-node dev/demo.
+    # For production, use NetworkTopologyStrategy with RF=3.
     session.execute("""
         CREATE KEYSPACE IF NOT EXISTS cybersecurity
         WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}

@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Detection rule 5: ML-based real-time classification in `spark_streaming.py`.
+  The trained Random Forest pipeline is loaded from HDFS at streaming job startup
+  and applied to every raw Kafka event. Non-benign predictions are written to
+  Cassandra as `attack_type = "ml-malicious"` (score 85) or `"ml-suspicious"`
+  (score 60), making them visible in the live Grafana threat feed alongside
+  rule-based detections. The stream starts gracefully if the model is not yet
+  trained (`make ml-train` required first).
+- `ML_MODEL_PATH` env var added to `.env.example` (default:
+  `hdfs://namenode:9000/models/threat_classifier`)
+- `ml-malicious` added to `EXPLOIT_STAGES` so ML-detected exploits can trigger
+  the APT kill-chain correlation rule
+
 ---
 
 ## [1.0.0] - 2026-05-09

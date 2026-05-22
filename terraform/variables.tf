@@ -24,6 +24,12 @@ variable "expose_api" {
   default     = false
 }
 
+variable "ssh_allowed_ips" {
+  description = "CIDR blocks allowed to SSH into droplets (restrict to your IP/VPN)"
+  type        = list(string)
+  default     = ["0.0.0.0/0", "::/0"] # Override in terraform.tfvars with your IP
+}
+
 variable "ssh_public_key_path" {
   description = "Path to the SSH public key to upload to Digital Ocean"
   default     = "~/.ssh/do_cyber.pub"

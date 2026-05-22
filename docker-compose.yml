@@ -53,7 +53,7 @@ services:
       - cyber-net
 
   hbase:
-    image: dajobe/hbase
+    image: dajobe/hbase:latest
     container_name: hbase
     hostname: hbase-docker
     profiles: [batch, serve]
@@ -174,7 +174,7 @@ services:
       - cyber-net
 
   cassandra:
-    image: cassandra:4.1
+    image: cassandra:4.1.7
     container_name: cassandra
     profiles: [stream, serve]
     ports:
@@ -196,7 +196,7 @@ services:
       start_period: 60s
 
   cassandra-init:
-    image: cassandra:4.1
+    image: cassandra:4.1.7
     container_name: cassandra-init
     profiles: [stream, serve]
     depends_on:

@@ -7,3 +7,7 @@
 
 # ssh_public_key_path  = "~/.ssh/do_cyber.pub"
 # ssh_private_key_path = "~/.ssh/do_cyber"
+
+# Restrict SSH to your IP (recommended for production).
+# Find your IP: curl -s ifconfig.me
+# ssh_allowed_ips = ["YOUR_IP/32"]

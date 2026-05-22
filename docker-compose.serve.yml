@@ -21,7 +21,8 @@ services:
   serving:
     build: ./serving
     container_name: serving
-    # No public port — only reachable inside the Docker network (by Caddy)
+    ports:
+      - "8000:8000"
     environment:
       - CASSANDRA_HOST=INFRA_PRIVATE_IP
       - CASSANDRA_PORT=9042

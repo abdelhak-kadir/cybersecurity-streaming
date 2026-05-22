@@ -148,6 +148,30 @@ try:
 except Exception as e:
     print(f" Attention: Pas de données de volume trouvées sur HDFS ({e})")
 
+# ── 5.quinquies Stocker les attaques par protocole ────────────────────
+print("\n Stockage des types d'attaques par protocole...")
+ATTACKS_BY_PROTOCOL_PATH = "hdfs://namenode:9000/results/attacks_by_protocol/"
+
+try:
+    attacks_by_proto = spark.read.parquet(ATTACKS_BY_PROTOCOL_PATH)
+
+    for row in attacks_by_proto.collect():
+        row_key = f"PROTO_{row['protocol']}_{row['threat_label']}".encode()
+        table_attacks.put(
+            row_key,
+            {
+                b"info:protocol": str(row["protocol"]).encode(),
+                b"info:threat_label": str(row["threat_label"]).encode(),
+                b"info:nb_events": str(row["nb_events"]).encode(),
+                b"info:moyenne_bytes": str(row["moyenne_bytes"]).encode(),
+                b"info:total_bytes": str(row["total_bytes"]).encode(),
+                b"info:source": b"batch_attacks_by_protocol",
+            },
+        )
+    print(f" {attacks_by_proto.count()} lignes protocole×menace stockées dans attack_patterns")
+except Exception as e:
+    print(f" Attention: Pas de données attacks_by_protocol sur HDFS ({e})")
+
 # ── 6. Stocker threat_timeline ────────────────────────────────────────
 print("\n Stockage de la timeline des menaces...")
 df = spark.read.parquet(INPUT_LOGS_PATH)

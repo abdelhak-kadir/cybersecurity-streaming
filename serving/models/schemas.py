@@ -15,6 +15,11 @@ class RecentEvent(BaseModel):
     attack_type: Optional[str]
 
 
+class BlockRecommendation(BaseModel):
+    action: str
+    reason: str
+
+
 class IPReputationResponse(BaseModel):
     ip: str
     merged_reputation_score: float
@@ -22,6 +27,7 @@ class IPReputationResponse(BaseModel):
     total_realtime_alerts: int
     nb_batch_attacks: int
     last_seen: Optional[str]
+    recommendation: BlockRecommendation
     recent_events: list[RecentEvent]
     batch_data: Optional[dict]
 
@@ -87,6 +93,13 @@ class ThreatTimelinePoint(BaseModel):
 
 class ThreatVolumePoint(BaseModel):
     threat_label: str
+    total_bytes: float
+
+
+class AttackByProtocol(BaseModel):
+    protocol: str
+    threat_label: str
+    nb_events: int
     total_bytes: float
 
 

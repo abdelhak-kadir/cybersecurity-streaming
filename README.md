@@ -2,9 +2,9 @@
 
 A production-grade big data pipeline that ingests network security logs, detects threats in real time via Spark Structured Streaming, builds historical analytics with HDFS + HBase, trains an ML threat classifier, and serves everything through a FastAPI backend with a live Grafana dashboard and automated email alerting.
 
-> **Live demo:** [https://grafana.project-demo.tech](https://grafana.project-demo.tech)  
 > **Source code:** [github.com/oubellaismail/cybersecurity-streaming](https://github.com/oubellaismail/cybersecurity-streaming)  
-> **Dataset:** [Cybersecurity Threat Detection Logs](https://www.kaggle.com/datasets/aryan208/cybersecurity-threat-detection-logs) — 6.18M network log events (874 MB CSV)
+> **Dataset:** [Cybersecurity Threat Detection Logs](https://www.kaggle.com/datasets/aryan208/cybersecurity-threat-detection-logs) — 6.18M network log events (874 MB CSV)  
+> **Note:** A live demo was hosted at `grafana.project-demo.tech` and `api.project-demo.tech`. Since the project has been defended, the cloud infrastructure has been shut down due to hosting costs.
 
 ---
 
@@ -48,7 +48,7 @@ A production-grade big data pipeline that ingests network security logs, detects
                                        ▼
               ╔════════════════════════════════════════╗
               ║            SERVING LAYER               ║
-              ║   FastAPI :8000  —  14 REST endpoints  ║
+              ║   FastAPI :8000  —  15 REST endpoints  ║
               ║   /api/ip/{ip}  /api/threats/live      ║
               ║   /api/scoring/adaptive  /api/ml/*     ║
               ║   /metrics  (Prometheus format)        ║
@@ -89,7 +89,7 @@ A production-grade big data pipeline that ingests network security logs, detects
 | Speed storage | Apache Cassandra | 4.1 | High-write, native 24h TTL |
 | Batch storage | HBase + HDFS | 2.1 / 3.2.1 | Pre-computed batch views |
 | ML | PySpark MLlib — Random Forest | 3.3.0 | 97.1% accuracy on 6.18M records |
-| Serving | FastAPI + Python | 0.110 / 3.9 | 14-endpoint REST API, Lambda merge |
+| Serving | FastAPI + Python | 0.115 / 3.12 | 15-endpoint REST API, Lambda merge |
 | Metrics | Prometheus | 2.51.0 | Pull-based scraping of `/metrics` every 15s |
 | Dashboard & Alerting | Grafana + Infinity plugin | 10.4.2 | Live panels + 4 email alert rules |
 | Email delivery | SendGrid SMTP | — | Authenticated sender `alert@project-demo.tech` |
@@ -338,6 +338,7 @@ GET /api/stats/threat-volume
 GET /api/stats/threat-timeline?days=30
 GET /api/stats/geo-threats
 GET /api/stats/attack-patterns
+GET /api/stats/attacks-by-protocol   → Attack distribution by protocol
 
 # ML layer
 GET /api/ml/summary
@@ -366,6 +367,7 @@ The main dashboard uses the **Infinity** datasource to query the FastAPI REST AP
 | Threat Timeline (30 days) | `/api/stats/threat-timeline` |
 | Threat Volume by Label | `/api/stats/threat-volume` |
 | Multi-Step Correlations | `/api/threats/correlated` |
+| Attack Types by Protocol | `/api/stats/attacks-by-protocol` |
 | ML Model Summary | `/api/ml/summary` + `/api/ml/metrics` |
 
 ### Alerting pipeline

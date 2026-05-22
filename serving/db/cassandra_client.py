@@ -10,8 +10,15 @@ KEYSPACE = "cybersecurity"
 class CassandraClient:
     def __init__(self):
         from cassandra.cluster import Cluster  # lazy — not imported when class is mocked in tests
-        self.cluster = Cluster([CASSANDRA_HOST], port=CASSANDRA_PORT)
+        from cassandra.policies import DCAwareRoundRobinPolicy
+        self.cluster = Cluster(
+            [CASSANDRA_HOST],
+            port=CASSANDRA_PORT,
+            load_balancing_policy=DCAwareRoundRobinPolicy(local_dc="datacenter1"),
+            protocol_version=4,
+        )
         self.session = self.cluster.connect(KEYSPACE)
+        self.session.default_timeout = 10  # seconds — prevents indefinite hangs
 
     def close(self):
         self.cluster.shutdown()
@@ -74,11 +81,12 @@ class CassandraClient:
         since = datetime.utcnow() - timedelta(minutes=minutes)
         query = (
             "SELECT ip_source, last_seen, threat_score, attack_type "
-            "FROM realtime_threats WHERE last_seen >= %s ALLOW FILTERING"
+            "FROM realtime_threats WHERE last_seen >= %s "
+            "LIMIT %s ALLOW FILTERING"
         )
-        rows = list(self.session.execute(query, [since]))
+        rows = list(self.session.execute(query, [since, limit]))
         rows.sort(key=lambda r: r.last_seen or datetime.min, reverse=True)
-        return rows[:limit]
+        return rows
 
     def get_correlated_attacks(self, minutes: int = 60, limit: int = 100) -> list:
         since = datetime.utcnow() - timedelta(minutes=minutes)

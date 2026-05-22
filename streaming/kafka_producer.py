@@ -30,6 +30,10 @@ def wait_for_kafka(broker, retries=10, delay=5):
                 bootstrap_servers=broker,
                 value_serializer=lambda v: json.dumps(v).encode("utf-8"),
                 key_serializer=lambda k: k.encode("utf-8"),
+                acks="all",
+                batch_size=32768,
+                linger_ms=50,
+                retries=3,
             )
             print(f"Connected to Kafka at {broker}")
             return producer
@@ -37,6 +41,26 @@ def wait_for_kafka(broker, retries=10, delay=5):
             print(f"Kafka not ready, retrying in {delay}s... ({i+1}/{retries})")
             time.sleep(delay)
     raise RuntimeError("Could not connect to Kafka after multiple retries.")
+
+
+_send_errors = 0
+
+
+def _on_send_error(exc):
+    global _send_errors
+    _send_errors += 1
+    if _send_errors <= 10 or _send_errors % 100 == 0:
+        print(f"[producer] send failed ({_send_errors} total): {exc}")
+
+
+def _safe_int(value, default=0):
+    """Convert value to int, returning default on failure."""
+    if value is None or value == "":
+        return default
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
 
 
 def row_to_message(row: dict) -> dict:
@@ -48,7 +72,7 @@ def row_to_message(row: dict) -> dict:
         "protocol":          row.get("protocol", ""),
         "action":            row.get("action", ""),
         "threat_label":      row.get("threat_label", ""),
-        "bytes_transferred": int(row.get("bytes_transferred", 0) or 0),
+        "bytes_transferred": _safe_int(row.get("bytes_transferred")),
         "user_agent":        row.get("user_agent", ""),
         "request_path":      row.get("request_path", ""),
     }
@@ -74,7 +98,7 @@ def main():
                 topic=KAFKA_TOPIC,
                 key=message["source_ip"],
                 value=message,
-            )
+            ).add_errback(_on_send_error)
             sent += 1
             if sent % 100 == 0:
                 print(f"Sent {sent} messages...")
@@ -82,7 +106,7 @@ def main():
                 break
             time.sleep(DELAY_SECONDS)
 
-    producer.flush()
+    producer.flush(timeout=30)
     producer.close()
     print(f"Done. Total messages sent: {sent}")
 

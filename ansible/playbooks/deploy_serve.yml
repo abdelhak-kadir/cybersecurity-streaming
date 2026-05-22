@@ -5,14 +5,16 @@
   vars:
     compose_file: docker-compose.serve.yml
     project: /opt/cyber
-    grafana_subdomain: "{{ lookup('env', 'GRAFANA_SUBDOMAIN') or 'grafana.' + lookup('env', 'DOMAIN') }}"
-    api_subdomain:     "{{ lookup('env', 'API_SUBDOMAIN')     or 'api.'     + lookup('env', 'DOMAIN') }}"
-    acme_email:        "{{ lookup('env', 'ACME_EMAIL') }}"
-    expose_api:        "{{ lookup('env', 'EXPOSE_API') | default('false') }}"
-    gf_password:       "{{ lookup('env', 'GF_SECURITY_ADMIN_PASSWORD') | default('admin') }}"
+    # Read .env file as fallback when shell env vars are not exported
+    _dotenv: "{{ lookup('file', playbook_dir + '/../../.env', errors='ignore') | default('') }}"
+    grafana_subdomain: "{{ lookup('env', 'GRAFANA_SUBDOMAIN') or lookup('ini', 'GRAFANA_SUBDOMAIN', type='properties', file=playbook_dir + '/../../.env', errors='ignore') | default('grafana.' + (lookup('env', 'DOMAIN') or 'project-demo.tech')) }}"
+    api_subdomain:     "{{ lookup('env', 'API_SUBDOMAIN')     or lookup('ini', 'API_SUBDOMAIN', type='properties', file=playbook_dir + '/../../.env', errors='ignore') | default('api.' + (lookup('env', 'DOMAIN') or 'project-demo.tech')) }}"
+    acme_email:        "{{ lookup('env', 'ACME_EMAIL')        or lookup('ini', 'ACME_EMAIL', type='properties', file=playbook_dir + '/../../.env', errors='ignore') | default('') }}"
+    expose_api:        "{{ lookup('env', 'EXPOSE_API')        or lookup('ini', 'EXPOSE_API', type='properties', file=playbook_dir + '/../../.env', errors='ignore') | default('false') }}"
+    gf_password:       "{{ lookup('env', 'GF_SECURITY_ADMIN_PASSWORD') or lookup('ini', 'GF_SECURITY_ADMIN_PASSWORD', type='properties', file=playbook_dir + '/../../.env', errors='ignore') | default('admin') }}"
     # ── SendGrid / alerting ───────────────────────────────────────────────────
-    alert_email:         "{{ lookup('env', 'ALERT_EMAIL') | default('') }}"
-    sendgrid_api_key:    "{{ lookup('env', 'SENDGRID_API_KEY') }}"
+    alert_email:         "{{ lookup('env', 'ALERT_EMAIL')      or lookup('ini', 'ALERT_EMAIL', type='properties', file=playbook_dir + '/../../.env', errors='ignore') | default('') }}"
+    sendgrid_api_key:    "{{ lookup('env', 'SENDGRID_API_KEY') or lookup('ini', 'SENDGRID_API_KEY', type='properties', file=playbook_dir + '/../../.env', errors='ignore') | default('') }}"
 
   tasks:
 

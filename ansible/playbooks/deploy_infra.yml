@@ -52,16 +52,26 @@
         host: localhost
         timeout: 90
 
+    - name: Check if Kafka topic already exists
+      shell: >
+        docker exec kafka kafka-topics --bootstrap-server localhost:9092 --list
+        | grep -q cybersecurity-logs
+      args:
+        chdir: "{{ project }}"
+      register: topic_exists
+      ignore_errors: true
+
     - name: Run kafka-setup (creates cybersecurity-logs topic)
       shell: >
         docker compose -f {{ compose_file }} run --rm kafka-setup
       args:
         chdir: "{{ project }}"
       register: kafka_setup_result
+      when: topic_exists.rc != 0
 
     - name: Show kafka-setup output
       debug:
-        msg: "{{ kafka_setup_result.stdout_lines }}"
+        msg: "{{ kafka_setup_result.stdout_lines | default(['Topic already exists — skipped']) }}"
 
     - name: Start Cassandra
       community.docker.docker_compose_v2:
@@ -81,16 +91,26 @@
       args:
         chdir: "{{ project }}"
 
+    - name: Check if Cassandra keyspace already has tables
+      shell: >
+        docker exec cassandra cqlsh -e "USE cybersecurity; DESCRIBE TABLES;" 2>/dev/null
+        | grep -q realtime_threats
+      args:
+        chdir: "{{ project }}"
+      register: tables_exist
+      ignore_errors: true
+
     - name: Run cassandra-init (creates keyspace and tables)
       shell: >
         docker compose -f {{ compose_file }} run --rm cassandra-init
       args:
         chdir: "{{ project }}"
       register: cassandra_init_result
+      when: tables_exist.rc != 0
 
     - name: Show cassandra-init output
       debug:
-        msg: "{{ cassandra_init_result.stdout_lines }}"
+        msg: "{{ cassandra_init_result.stdout_lines | default(['Tables already exist — skipped']) }}"
 
     - name: Verify Cassandra schema
       shell: >

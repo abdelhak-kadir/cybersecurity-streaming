@@ -22,7 +22,7 @@ HDFS parquet logs
   VectorAssembler            13 features → single vector column
   StandardScaler             zero mean, unit variance
        ↓
-  RandomForestClassifier     100 trees, max depth 10
+  RandomForestClassifier     30 trees, max depth 8
        ↓
   Predictions + Metrics
        ↓

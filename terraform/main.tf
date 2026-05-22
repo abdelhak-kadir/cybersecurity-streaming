@@ -64,7 +64,7 @@ resource "digitalocean_firewall" "infra" {
   inbound_rule {
     protocol         = "tcp"
     port_range       = "22"
-    source_addresses = ["0.0.0.0/0", "::/0"]
+    source_addresses = var.ssh_allowed_ips
   }
   inbound_rule {
     protocol           = "tcp"
@@ -102,7 +102,7 @@ resource "digitalocean_firewall" "compute" {
   inbound_rule {
     protocol         = "tcp"
     port_range       = "22"
-    source_addresses = ["0.0.0.0/0", "::/0"]
+    source_addresses = var.ssh_allowed_ips
   }
   inbound_rule {
     protocol           = "tcp"
@@ -135,7 +135,7 @@ resource "digitalocean_firewall" "serve" {
   inbound_rule {
     protocol         = "tcp"
     port_range       = "22"
-    source_addresses = ["0.0.0.0/0", "::/0"]
+    source_addresses = var.ssh_allowed_ips
   }
   # HTTP — required for Let's Encrypt ACME HTTP-01 challenge
   inbound_rule {
@@ -147,6 +147,12 @@ resource "digitalocean_firewall" "serve" {
   inbound_rule {
     protocol         = "tcp"
     port_range       = "443"
+    source_addresses = ["0.0.0.0/0", "::/0"]
+  }
+  # FastAPI direct access
+  inbound_rule {
+    protocol         = "tcp"
+    port_range       = "8000"
     source_addresses = ["0.0.0.0/0", "::/0"]
   }
 
